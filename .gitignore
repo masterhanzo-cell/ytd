@@ -9,6 +9,9 @@ __pycache__/
 .DS_Store
 .idea/
 
+# Nota de progreso antigua (superseded by progress.md), solo local
+progreso.md
+
 # Estado y configuración locales del usuario (viven fuera del repo):
 #   ~/.local/state/ytd/{queue,library,cache}.json
 #   ~/.config/ytd/config.toml
