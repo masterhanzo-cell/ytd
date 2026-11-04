@@ -156,3 +156,37 @@ Clearlight/…                    1 (audio subido mal por el autor de la playlis
 - [ ] `ytd repair-only-tags` (retag sin re-consulta API).
 - [ ] Modo `--dry-run`.
 - [ ] Fallback a servidores Invidious/Piped si YouTube bloquea.
+
+## v1.5 — Editor visual de metadatos (`ytd edit`)
+
+### Qué se añadió
+- Subcomando `ytd edit <archivo.mp3>` (+ flag `--yes`): panel interactivo
+  con el estado actual del fichero (artista, título, álbum, pista, año,
+  carátula) y sugerencias ordenadas por prioridad:
+  1. huella acústica (AcoustID, recalculada al vuelo con caché);
+  2. búsqueda de grabaciones en MusicBrainz (WS2 search `recording`)
+     por título+artista actuales; fallback a solo título.
+- Las sugerencias se muestran legibles («Panic Attack — Dream Theater»),
+  no como rids crudos.
+- Al elegir una sugerencia se recuperan álbum/pista/año/carátula desde
+  MusicBrainz (con `select_release` + Cover Art Archive), se muestra una
+  **vista previa** completa y se pide confirmación antes de mover/retag.
+- Si la sugerencia no trae carátula, **se conserva la existente** (evita
+  perder arte al reaplicar).
+- `[e]` → edición manual campo a campo (ahora incluye **año**);
+  `[g]` → guardar tal cual (normaliza ruta canónica); `[q]` → salir.
+- Helpers nuevos: `_truncar`, `_mb_search_recordings`, `_meta_desde_recording`,
+  `_apply_meta`, `_estado` (panel).
+
+### Pruebas hechas
+- `printf 'q\n' | ytd edit <real>`: panel + sugerencias OK, sin mutación.
+- Ciclo completo en sandbox (`/tmp/opencode/testlib`, config local con
+  `music_dir` falso): sugerencia huella aplicada → fichero movido a
+  `Death/Symbolic/03 - Empty Words.mp3`, ID3 correctos y **APIC sí**
+  (carátula conservada). Sandbox borrado.
+
+### Notas
+- `ytd edit` funciona sobre cualquier ruta (no solo la biblioteca); el
+  destino final siempre se calcula dentro de `music_dir`.
+- La sección nueva del README es la 8b (entre «Cómo funciona» y
+  «Solución de problemas»).

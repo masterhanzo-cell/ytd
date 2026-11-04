@@ -148,8 +148,7 @@ Multas de confianza: cuando la huella da un **score bajo** o un título muy
 distinto al de YouTube, el programa te pregunta:
 
 ```
-! Identificación dudosa: título divergente de YouTube (20% de similitud)
-    huella:  «Spiritual Healing» — Clearlight [Spiritual Healing]
+! Identificación dudosa: título divergente de YouTube (20% de similitud)    huella:  «Spiritual Healing» — Clearlight [Spiritual Healing]
     youtube: «Death - Spiritual Healing»
   ¿Qué hago? [s]aceptar huella  [y]usar título de YouTube  [m]editar a mano  [n]omitir esta pista:
 ```
@@ -206,6 +205,41 @@ ese caso el sistema etiqueta lo que el AUDIO realmente es. Solución:
 descarga el tema correcto de otro vídeo (`ytd search "Artista - Tema"`) y
 elimina el fichero equivocado.
 
+## 8b. Editor visual de metadatos (`ytd edit`)
+
+Para revisar y corregir un fichero con comodidad (muy útil para los casos que
+quedaron «para revisión» en `verify`):
+
+```bash
+ytd edit archivo.mp3        # panel con estado actual + sugerencias
+ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
+```
+
+```
+──────────────────────────────────────────────────────────────────────
+  Editor de metadatos — Dream Theater/…/03 - Panic Attack (2).mp3
+──────────────────────────────────────────────────────────────────────
+  Fichero: Dream Theater/Chaos in Motion 2007–2008/03 - Panic Attack (2).mp3
+    Artista: Dream Theater
+    Título:  Panic Attack
+    Álbum:   Chaos in Motion 2007–2008    Pista: 3   Año: 2008   Carátula: sí
+──────────────────────────────────────────────────────────────────────
+  Sugerencias (por prioridad):
+    [1] Panic Attack — Dream Theater  huella
+    [2] Panic Attack — Dream Theater  búsqueda
+    ...
+  ¿Siguiente paso? [1-N] usar sugerencia · [e]ditar campos · [g]uardar como está · [q]salir:
+```
+
+- **Sugerencia 1** = lo que AcoustID reconoce por huella; **2..N** = búsquedas
+  en MusicBrainz por título/artista actuales.
+- Al elegir una sugerencia se muestran los datos completos (álbum, pista, año,
+  carátula) y se pide confirmación antes de mover/retiquetar.
+- Si la sugerencia no aporta carátula, se conserva la existente.
+- `[e]` permite editar campos a mano (artista, título, álbum, año, pista).
+- `[g]` normaliza el fichero (moverlo a su ruta canónica) con las etiquetas
+  actuales.
+
 ## 9. Solución de problemas
 
 - **«yt-dlp: error: no such option»**: probablemente tu yt-dlp es una
@@ -240,6 +274,9 @@ elimina el fichero equivocado.
 
 ## Registro de versión rápida
 
+- **v1.5** — `ytd edit`: editor visual interactivo de metadatos con
+  sugerencias (huella AcoustID + búsqueda MusicBrainz), preview antes de
+  aplicar, conservación de carátula y campo año en la edición manual.
 - **v1.4** — `ytd verify` (auditoría sin red y `--red` contra MusicBrainz,
   `--fix` con deduplicación por MD5), puerta de confianza interactiva para
   identificaciones dudosas (`confirm_low_confidence`, `--yes`).

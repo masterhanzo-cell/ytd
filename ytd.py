@@ -629,6 +629,9 @@ def _pedir_edicion_manual(meta: dict) -> dict:
     nuevo = input(f"  álbum    [{meta.get('album') or '-'}]: ").strip()
     if nuevo:
         meta["album"] = nuevo
+    nuevo = input(f"  año      [{meta.get('year') or '-'}]: ").strip()
+    if str(nuevo).isdigit():
+        meta["year"] = nuevo
     nuevo = input(f"  nº pista [{meta.get('track') or '-'}]: ").strip()
     if str(nuevo).isdigit():
         meta["track"] = int(nuevo)
@@ -996,6 +999,191 @@ def cmd_fix(cfg: Config, fargs) -> None:
     print(f"\n{c(GREEN, f'✔ {hechas}/{len(candidatos)} pistas corregidas')}")
 
 
+# ------------------------------------------------------ edición interactiva --
+def _truncar(s: str, n: int = 60) -> str:
+    s = str(s or "")
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+BAR = "─" * 78
+
+
+def _mb_search_recordings(artista: str, titulo: str, limit: int = 5) -> list[dict]:
+    """Búsqueda de grabaciones en MusicBrainz (Web Search) por artista/título."""
+    terminos = [f'recording:"{titulo}"']
+    if artista:
+        terminos.append(f'artist:"{artista}"')
+    q = urllib.parse.quote(" AND ".join(terminos))
+    url = (f"https://musicbrainz.org/ws/2/recording/?query={q}"
+           f"&fmt=json&limit={limit}")
+    try:
+        data = _mb_get_retry(url) or {}
+    except Exception as e:
+        warn(f"Búsqueda MusicBrainz no disponible: {e}")
+        return []
+    candidatos = []
+    for r in data.get("recordings") or []:
+        cred = r.get("artist-credit") or []
+        artista_found = (cred[0].get("artist") or {}).get("name") \
+            if cred and isinstance(cred[0], dict) else ""
+        candidatos.append({
+            "rid": r.get("id"),
+            "title": r.get("title") or "",
+            "artist": artista_found,
+        })
+    return candidatos
+
+
+def _meta_desde_recording(rid: str) -> dict | None:
+    """Construye metadatos completos (álbum/pista/año/carátula) de una grabación MB."""
+    rec = mb_recording_info(rid)
+    if not rec:
+        return None
+    rel_id, pos, living = select_release(rec)
+    credits = rec.get("artist-credit") or []
+    artist = (credits[0].get("artist") or {}).get("name") if credits else ""
+    album, year, cover = "", "", None
+    if rel_id:
+        cover = cover_art(rel_id)
+        rel = next((r for r in rec["releases"] if r.get("id") == rel_id), None)
+        if rel:
+            album = rel.get("title") or ""
+            year = (rel.get("date") or "")[:4]
+    return {
+        "artist": artist,
+        "title": rec.get("title") or "",
+        "album": album,
+        "year": year,
+        "track": pos,
+        "cover": cover,
+    }
+
+
+def _apply_meta(cfg: Config, path: Path, meta: dict) -> Path:
+    """Reubica + reetiqueta un fichero con los metadatos dados."""
+    dest = final_path(cfg, meta, src=path)
+    if dest != path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(dest))
+    tag_mp3(dest, meta)
+    _update_library_path(load_library(), path, dest)
+    return dest
+
+
+def _estado(meta: dict, fichero: str) -> None:
+    print(f"  {c(DIM, BAR)}")
+    tiene_cover = bool(meta.get("cover"))
+    print(f"  {c(BOLD, 'Fichero')}: {c(DIM, fichero)}")
+    print(f"    {c(BOLD, 'Artista')}: {_truncar(meta.get('artist'))}")
+    print(f"    {c(BOLD, 'Título')}:  {_truncar(meta.get('title'))}")
+    print(f"    {c(BOLD, 'Álbum')}:   {_truncar(meta.get('album'))}    "
+          f"{c(BOLD, 'Pista')}: {meta.get('track') or '-'}    "
+          f"{c(BOLD, 'Año')}: {meta.get('year') or '-'}    "
+          f"{c(BOLD, 'Carátula')}: {'sí' if tiene_cover else 'no'}")
+    print(f"  {c(DIM, BAR)}")
+
+
+def cmd_edit(cfg: Config, pathstr: str, yes: bool = False) -> None:
+    """Editor interactivo de metadatos con sugerencias MusicBrainz/huella."""
+    if not pathstr:
+        fail("Uso: ytd edit <archivo.mp3>")
+    path = Path(pathstr).expanduser().resolve()
+    if not path.exists():
+        fail(f"No existe {path}")
+    cache = _read_json(CACHE_FILE, {})
+    tags = _load_tags(path)
+
+    meta_actual = {
+        "artist": _textframe(tags, "TPE1"),
+        "title": _textframe(tags, "TIT2") or path.stem,
+        "album": _textframe(tags, "TALB"),
+        "year": _textframe(tags, "TDRC").split("-")[0],
+        "track": int(_textframe(tags, "TRCK").split("/")[0] or 0) or None,
+        "cover": (tags.getall("APIC")[0].data if tags.getall("APIC") else None),
+    }
+    fichero_rel = str(path.relative_to(cfg.music_dir)) \
+        if path.is_relative_to(cfg.music_dir) else str(path)
+    estampas: list[tuple[str, str, str]] = []  # (origen, rid, etiqueta legible)
+
+    fpmeta = None
+    try:
+        fpmeta = acoustid_lookup(path, cfg, cache)
+        _write_json(CACHE_FILE, cache)
+    except Exception as e:
+        warn(f"Huella acústica no disponible: {e}")
+    if fpmeta and fpmeta.get("rid"):
+        etiqueta = f"{_truncar(fpmeta.get('title'), 28)} — {_truncar(fpmeta.get('artist'), 25)}"
+        estampas.append(("huella", fpmeta["rid"], etiqueta))
+    for cand in _mb_search_recordings(meta_actual["artist"], meta_actual["title"]):
+        if cand.get("rid") and not any(rid == cand["rid"] for _, rid, _ in estampas):
+            etiqueta = f"{_truncar(cand.get('title'), 28)} — {_truncar(cand.get('artist'), 25)}"
+            estampas.append(("búsqueda", cand["rid"], etiqueta))
+    if not estampas and meta_actual["title"]:
+        for cand in _mb_search_recordings("", meta_actual["title"]):
+            if cand.get("rid"):
+                estampas.append(("búsqueda", cand["rid"],
+                                 f"{_truncar(cand.get('title'), 28)} — {_truncar(cand.get('artist'), 25)}"))
+        if not estampas:
+            print("  (sin sugerencias para estos datos)")
+
+    # con --yes, aplica directamente la mejor sugerencia disponible
+    if yes and estampas:
+        meta_sug = _meta_desde_recording(estampas[0][1])
+        if meta_sug and meta_sug["album"]:
+            if not meta_sug.get("cover") and meta_actual.get("cover"):
+                meta_sug["cover"] = meta_actual["cover"]
+            dest = _apply_meta(cfg, path, meta_sug)
+            ok(f"Sugerencia aplicada: {dest}")
+            return
+
+    while True:
+        print()
+        print(c(BOLD, BAR))
+        print(c(BOLD, f"  Editor de metadatos — {fichero_rel}"))
+        print(c(BOLD, BAR))
+        _estado(meta_actual, fichero_rel)
+        if estampas:
+            print(f"  {c(BOLD, 'Sugerencias')} (por prioridad):")
+            for i, (origen, rid, etiqueta) in enumerate(estampas, 1):
+                print(f"    [{i}] {c(CYAN, etiqueta)}  {c(DIM, origen)}")
+        try:
+            eleccion = input(
+                "  ¿Siguiente paso? [1-N] usar sugerencia · [e]ditar campos · "
+                "[g]uardar como está · [q]salir: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if eleccion in ("q", ""):
+            return
+        if eleccion == "e":
+            meta_actual = _pedir_edicion_manual(meta_actual)
+            continue
+        if eleccion == "g":
+            dest = _apply_meta(cfg, path, meta_actual)
+            ok(f"Guardado: {dest}")
+            return
+        if eleccion.isdigit() and 1 <= int(eleccion) <= len(estampas):
+            origen, rid, _ = estampas[int(eleccion) - 1]
+            info(f"Recuperando «{origen}» ({rid}) desde MusicBrainz...")
+            meta_sug = _meta_desde_recording(rid)
+            if not meta_sug:
+                warn("Sin datos en MusicBrainz para esa sugerencia")
+                continue
+            if not meta_sug.get("cover") and meta_actual.get("cover"):
+                meta_sug["cover"] = meta_actual["cover"]  # conserva la actual
+            _estado(meta_sug, fichero_rel)
+            try:
+                aplicar = input("  ¿Aplicar estos metadatos? [s]/n: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if aplicar in ("", "s", "y"):
+                dest = _apply_meta(cfg, path, meta_sug)
+                ok(f"Aplicado: {dest}")
+                return
+            continue
+        warn("Opción no válida")
+
+
 # ------------------------------------------------------------ verificación --
 def _md5(path: Path) -> str:
     h = hashlib.md5()
@@ -1326,7 +1514,7 @@ def cmd_config() -> None:
 
 
 # -------------------------------------------------------------------- CLI --
-_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "verify", "clean", "config", "doctor", "help"}
+_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "edit", "verify", "clean", "config", "doctor", "help"}
 
 
 def main() -> None:
@@ -1342,6 +1530,7 @@ def main() -> None:
             "  ytd fix                       # re-identifica pistas sin álbum (sin re-descargar)\n"
             "  ytd fix file.mp3 --album 'Álbum' --pista 3 --artista 'Grupo'  # a mano\n"
             "  ytd verify --red              # audita la biblioteca contra MusicBrainz\n"
+            "  ytd edit archivo.mp3          # editor interactivo con sugerencias\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1373,6 +1562,13 @@ def main() -> None:
             if not rest:
                 fail("Uso: ytd add <URL> [URL...]")
             cmd_urls(cfg, rest)
+        elif sub == "edit":
+            eap = argparse.ArgumentParser(prog="ytd edit")
+            eap.add_argument("archivo", help="MP3 a editar")
+            eap.add_argument("--yes", "-y", action="store_true",
+                             help="aplicar directamente la mejor sugerencia")
+            cmd_edit(cfg, eap.parse_args(rest).archivo,
+                     yes=bool(eap.parse_args(rest).yes))
         elif sub == "verify":
             vap = argparse.ArgumentParser(prog="ytd verify")
             vap.add_argument("--red", action="store_true",
