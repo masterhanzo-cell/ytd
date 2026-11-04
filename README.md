@@ -120,7 +120,45 @@ ytd fix archivo.mp3 --artista "Death" --album "Spiritual Healing" \
 Todos los parámetros `--artista/--album/--titulo/--pista/--anio/--cover` son
 opcionales: lo que no indiques mantiene el valor existente.
 
-## 5. Otros comandos
+## 5. Verificar la biblioteca (`ytd verify`)
+
+Auditoría de tu biblioteca **sin usar la red** (rápido) o contra MusicBrainz:
+
+```bash
+ytd verify                    # estructural: etiquetas faltantes, carátulas,
+                              # nombres ≠ etiquetas, duplicados, rutas obsoletas
+ytd verify --red              # además: nº de pista/título contra MusicBrainz
+ytd verify --fix              # corrige automáticamente lo que puede:
+                              #   · borra duplicados idénticos (MD5)
+                              #   · re-identifica los ficheros con incidencias
+                              #   · limpia entradas obsoletas de library.json
+ytd verify --fix --red        # auditoría completa + corrección
+```
+
+Los casos que `verify` **no** corrige solo (para que decidas tú):
+
+- «posible duplicado» con audio **distinto**: son dos grabaciones diferentes
+  (p. ej. dos tomas live de la misma canción) que acabaron con el mismo
+  nombre — decide cuál conservar;
+- «sin registro en library.json»: el fichero no guarda el id del vídeo de
+  origen (p. ej. descargas manuales);
+- falsos positivos de AcoustID mirando el AUDIO real.
+
+Multas de confianza: cuando la huella da un **score bajo** o un título muy
+distinto al de YouTube, el programa te pregunta:
+
+```
+! Identificación dudosa: título divergente de YouTube (20% de similitud)
+    huella:  «Spiritual Healing» — Clearlight [Spiritual Healing]
+    youtube: «Death - Spiritual Healing»
+  ¿Qué hago? [s]aceptar huella  [y]usar título de YouTube  [m]editar a mano  [n]omitir esta pista:
+```
+
+- Al añadir la cola con `ytd dl --yes` o `ytd fix --yes`, se acepta sin
+  preguntar (útil en descargas nocturnas grandes).
+- Configurable con `confirm_low_confidence = true/false` en el config.
+
+## 6. Otros comandos
 
 ```bash
 ytd config        # muestra los valores actuales y la ruta del config
@@ -128,13 +166,14 @@ ytd doctor        # comprueba dependencias (yt-dlp, ffmpeg, fpcalc, mutagen), AP
 ytd help
 ```
 
-## 6. Configuración (`~/.config/ytd/config.toml`)
+## 7. Configuración (`~/.config/ytd/config.toml`)
 
 | Clave              | Descripción                                              |
 |--------------------|----------------------------------------------------------|
 | `acoustid_api_key` | Clave **de aplicación** de AcoustID (no la personal)     |
 | `music_dir`        | Carpeta destino (por defecto `~/Música/YTD`)             |
 | `ytdlp_extra`      | Argumentos extra para yt-dlp, p. ej. cookies de navegador |
+| `confirm_low_confidence` | Pregunta cuando la identificación parece dudosa    |
 
 Ejemplo con cookies (útil para vídeos con restricción de edad o 18+):
 
@@ -142,7 +181,7 @@ Ejemplo con cookies (útil para vídeos con restricción de edad o 18+):
 ytdlp_extra = ["--cookies-from-browser", "firefox"]
 ```
 
-## 7. Cómo funciona la identificación
+## 8. Cómo funciona la identificación
 
 1. **Descarga**: yt-dlp extrae el audio y ffmpeg lo convierte a MP3 CBR
    320 kbps en una carpeta temporal.
@@ -167,7 +206,7 @@ ese caso el sistema etiqueta lo que el AUDIO realmente es. Solución:
 descarga el tema correcto de otro vídeo (`ytd search "Artista - Tema"`) y
 elimina el fichero equivocado.
 
-## 8. Solución de problemas
+## 9. Solución de problemas
 
 - **«yt-dlp: error: no such option»**: probablemente tu yt-dlp es una
   versión vieja / cambiaron flags. Actualiza: `sudo dnf upgrade yt-dlp`.
@@ -186,7 +225,7 @@ elimina el fichero equivocado.
 - **Nombre mal calculado** (p. ej. «(drum & bass)» en el título):
   ejecuta `ytd fix archivo.mp3` — el selector elige la edición studio.
 
-## 9. Ficheros de estado (dónde vive la memoria)
+## 10. Ficheros de estado (dónde vive la memoria)
 
 ```
 ~/.config/ytd/config.toml        # configuración
@@ -201,6 +240,9 @@ elimina el fichero equivocado.
 
 ## Registro de versión rápida
 
+- **v1.4** — `ytd verify` (auditoría sin red y `--red` contra MusicBrainz,
+  `--fix` con deduplicación por MD5), puerta de confianza interactiva para
+  identificaciones dudosas (`confirm_low_confidence`, `--yes`).
 - **v1.3** — Selector multi-candidato studio/original, `ytd fix` (auto, `--todo`,
   manual), reintentos MusicBrainz, cache por huella, `~/Música/YTD` XDG.
 - **v1.2** — Fix AcoustID POST, scorers MusicBrainz (media/tracks), README.

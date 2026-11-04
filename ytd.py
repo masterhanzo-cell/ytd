@@ -81,6 +81,11 @@ music_dir = "~/Music/YTD"
 # Argumentos extra para yt-dlp (opcional), p. ej. cookies de un navegador:
 # ytdlp_extra = ["--cookies-from-browser", "firefox"]
 ytdlp_extra = []
+
+# Confirmación interactiva cuando la identificación parece dudosa
+# (score de huella bajo o título muy divergente del de YouTube).
+# Con false se auto-acepta siempre; con true pregunta (o usa ytd dl --yes).
+confirm_low_confidence = true
 """
 
 
@@ -91,6 +96,7 @@ class Config:
             (data.get("music_dir") or "~/Music/YTD").strip()
         ).expanduser()
         self.ytdlp_extra: list[str] = list(data.get("ytdlp_extra") or [])
+        self.confirm: bool = bool(data.get("confirm_low_confidence", True))
 
 
 def load_config() -> Config:
@@ -229,6 +235,21 @@ def _mb_get(url: str):
         time.sleep(wait)
     _last_mb_call = time.monotonic()
     return json.loads(_http_get(url, ua="ytd/1.0 (biblioteca personal)"))
+
+
+def _mb_get_retry(url: str, tries: int = 4):
+    """Igual que _mb_get pero con reintentos ante 503/429/5xx."""
+    for intento in range(tries):
+        try:
+            return _mb_get(url)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and intento < tries - 1:
+                pausa = 3 * (intento + 1)
+                warn(f"MusicBrainz saturado ({e.code}); reintento en {pausa}s...")
+                time.sleep(pausa)
+                continue
+            raise
+    return None
 
 
 # --------------------------------------------------------------- YouTube ---
@@ -559,6 +580,97 @@ def enrich(fpmeta: dict, thumb_url: str | None) -> dict:
     }
 
 
+# ------------------------------------------------------- confianza manual --
+def _tokens(s: str) -> set:
+    s = re.sub(r"[^\w\s]", " ", (s or "").lower())
+    return {w for w in s.split() if len(w) > 1}
+
+
+def _similarity(a: str, b: str) -> float:
+    """Jaccard simple sobre tokens normalizados (0..1)."""
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def evalua_confianza(yt_title: str, meta: dict, fpmeta: dict | None):
+    """Decisiones de si la identificación es dudosa: (dudosa, motivos)."""
+    motivos = []
+    score = (fpmeta or {}).get("score", 1.0)
+    if fpmeta and 0 < score < 0.5:
+        motivos.append(f"score de huella bajo ({score:.2f})")
+    sim = _similarity(cleanup_title(yt_title or ""), meta.get("title") or "")
+    if sim < 0.35:
+        motivos.append(f"título divergente de YouTube ({sim:.0%} de similitud)")
+    return bool(motivos), motivos
+
+
+def yt_meta_fallback(yt_title: str) -> dict:
+    """Metadatos desde el título de YouTube como último recurso."""
+    title = cleanup_title(yt_title or "")
+    guessed, name = split_artist_title(title)
+    return {
+        "artist": guessed or "Artista desconocido",
+        "title": name or "Sin título",
+        "album": "", "year": "", "track": None, "cover": None,
+    }
+
+
+def _pedir_edicion_manual(meta: dict) -> dict:
+    print(f"  Edita los campos (Enter = mantener el valor actual):")
+    meta = dict(meta)
+    nuevo = input(f"  artista  [{meta['artist']}]: ").strip()
+    if nuevo:
+        meta["artist"] = nuevo
+    nuevo = input(f"  título   [{meta['title']}]: ").strip()
+    if nuevo:
+        meta["title"] = nuevo
+    nuevo = input(f"  álbum    [{meta.get('album') or '-'}]: ").strip()
+    if nuevo:
+        meta["album"] = nuevo
+    nuevo = input(f"  nº pista [{meta.get('track') or '-'}]: ").strip()
+    if str(nuevo).isdigit():
+        meta["track"] = int(nuevo)
+    return meta
+
+
+def decide_meta(cfg: Config, yt_title: str, meta: dict, fpmeta: dict | None,
+                yes: bool) -> dict | None:
+    """Cuando la huella parece dudosa pregunta al usuario (o auto-acepta).
+
+    Devuelve los metadatos definitivos, o None si el usuario elige omitir."""
+    dudosa, motivos = evalua_confianza(yt_title, meta, fpmeta)
+    if not dudosa:
+        return meta
+    for m in motivos:
+        warn(f"Identificación dudosa: {m}")
+    print(f"    huella:  «{meta.get('title')}» — {meta.get('artist')}"
+          f"{(' [' + meta['album'] + ']') if meta.get('album') else ''}")
+    print(f"    youtube: «{cleanup_title(yt_title or '')}»")
+    if yes or not cfg.confirm or not sys.stdin.isatty():
+        warn("Aceptando la huella automáticamente (--yes / config)")
+        return meta
+    while True:
+        try:
+            eleccion = input(
+                "  ¿Qué hago? [s]aceptar huella  [y]usar título de YouTube  "
+                "[m]editar a mano  [n]omitir esta pista: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if eleccion in ("s", ""):
+            return meta
+        if eleccion == "y":
+            info("Usando los metadatos de YouTube")
+            return yt_meta_fallback(yt_title)
+        if eleccion == "m":
+            return _pedir_edicion_manual(meta)
+        if eleccion in ("n", "x", "q"):
+            return None
+        warn("Opción no válida (s/y/m/n)")
+
+
 # --------------------------------------------------------------- etiquetas --
 def tag_mp3(path: Path, meta: dict) -> None:
     try:
@@ -615,12 +727,15 @@ def final_path(cfg: Config, meta: dict, src: Path | None = None) -> Path:
 
 
 # --------------------------------------------------------------- procesado --
-def process_one(cfg: Config, cache: dict, item: dict) -> tuple[Path, dict]:
-    """Descarga un vídeo → MP3 320k → identifica → etiqueta → mueve a la biblioteca."""
+def process_one(cfg: Config, cache: dict, item: dict,
+                yes: bool = False) -> tuple[Path | None, dict | None]:
+    """Descarga un vídeo → MP3 320k → identifica → etiqueta → mueve a la
+    biblioteca. Devuelve (None, None) si el usuario omite la pista."""
     tmpdir = TMP_DIR / uuid.uuid4().hex[:8]
     try:
         mp3 = download_to_mp3(item["url"], tmpdir, cfg)
         thumb = extract_thumbnail(item["url"], cfg)
+        yt_title = item.get("title") or mp3.stem
         try:
             fpmeta = acoustid_lookup(mp3, cfg, cache)
         except AcoustIdInvalid:
@@ -631,19 +746,18 @@ def process_one(cfg: Config, cache: dict, item: dict) -> tuple[Path, dict]:
         if fpmeta:
             meta = enrich(fpmeta, thumb)
             if not meta["title"]:
-                meta["title"] = cleanup_title(item.get("title") or mp3.stem)
-            if not meta["artist"]:
-                guessed, _ = split_artist_title(item.get("title") or "")
-                meta["artist"] = guessed or "Artista desconocido"
+                meta["title"] = cleanup_title(yt_title)
+                if not meta["artist"]:
+                    guessed, _ = split_artist_title(yt_title)
+                    meta["artist"] = guessed or "Artista desconocido"
+            meta2 = decide_meta(cfg, yt_title, meta, fpmeta, yes)
+            if meta2 is None:
+                info("Pista omitida; queda pendiente para revisarla a mano")
+                return None, None
+            meta = meta2
         else:
             info("Uso el título de YouTube (sin huella acústica)")
-            title = cleanup_title(item.get("title") or mp3.stem)
-            guessed, name = split_artist_title(title)
-            meta = {
-                "artist": guessed or "Artista desconocido",
-                "title": name,
-                "album": "", "year": "", "track": None, "cover": None,
-            }
+            meta = yt_meta_fallback(yt_title)
             if thumb:
                 try:
                     meta["cover"] = _http_get(thumb, ua="ytd/1.0", timeout=20)
@@ -658,7 +772,7 @@ def process_one(cfg: Config, cache: dict, item: dict) -> tuple[Path, dict]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def process_queue(cfg: Config, always_yes: bool = True) -> None:
+def process_queue(cfg: Config, yes: bool = False) -> None:
     which_or_fail("yt-dlp", "sudo dnf install yt-dlp")
     q = load_queue()
     lib = load_library()
@@ -692,7 +806,9 @@ def process_queue(cfg: Config, always_yes: bool = True) -> None:
         nombre = item.get("title") or item["url"]
         print(f"\n{c(BOLD, f'[{idx}/{total}]')} {c(CYAN, nombre)}")
         try:
-            dest, meta2 = process_one(cfg, cache, item)
+            dest, meta2 = process_one(cfg, cache, item, yes=yes)
+            if dest is None:      # el usuario eligió omitir
+                continue
         except KeyboardInterrupt:
             warn("Interrumpido. La cola queda a salvo; continúa con 'ytd dl'")
             _write_json(CACHE_FILE, cache)
@@ -745,7 +861,19 @@ def _update_library_path(lib: dict, old: Path, new: Path) -> None:
             return
 
 
-def fix_auto_one(cfg: Config, cache: dict, path: Path) -> tuple[bool, str]:
+def thumb_for_file(path: Path, cfg: Config) -> str | None:
+    """Busca la URL del vídeo en library.json/queue para obtener su miniatura."""
+    lib = load_library()
+    vid = next((vid for vid, v in lib.items()
+                if isinstance(v, dict) and v.get("path") == str(path)), None)
+    if not vid:
+        return None
+    url = next((it.get("url") for it in load_queue()["items"]
+                if it.get("vid") == vid), None)
+    return extract_thumbnail(url, cfg) if url else None
+
+
+def fix_auto_one(cfg: Config, cache: dict, path: Path, yes: bool = False) -> tuple[bool, str]:
     """Re-identifica un fichero ya descargado (huella → álbum) y lo reubica."""
     tags = _load_tags(path)
     titulo = _textframe(tags, "TIT2") or path.stem
@@ -759,13 +887,21 @@ def fix_auto_one(cfg: Config, cache: dict, path: Path) -> tuple[bool, str]:
         warn(f"Huella no disponible: {e}")
     if not (fpmeta and fpmeta.get("rid")):
         return False, "sin coincidencias acústicas"
-    meta = enrich(fpmeta, None)
+    thumb = thumb_for_file(path, cfg)
+    meta = enrich(fpmeta, thumb)
     if not meta["title"]:
         meta["title"] = titulo
     if not meta["artist"]:
         meta["artist"] = artista_old
     if not (meta["artist"] and meta["album"]):
         return False, "MusicBrainz no aportó álbum"
+    decision = decide_meta(cfg, titulo, meta, fpmeta, yes)
+    if decision is None:
+        return False, "omitida"
+    if decision is not meta and not decision.get("album"):
+        info("  mantener etiquetas actuales (título de YouTube elegido)")
+        return False, "sin cambios (se mantienen las etiquetas actuales)"
+    meta = decision
     dest = final_path(cfg, meta, src=path)
     if dest != path:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -818,7 +954,7 @@ def cmd_fix(cfg: Config, fargs) -> None:
             fargs.artista or fargs.album or fargs.titulo
             or fargs.pista is not None or fargs.anio or fargs.cover
         )
-        resultado = fix_manual(cfg, p, fargs) if manual else fix_auto_one(cfg, cache, p)
+        resultado = fix_manual(cfg, p, fargs) if manual else fix_auto_one(cfg, cache, p, yes=bool(fargs.yes))
         _write_json(CACHE_FILE, cache)
         if resultado[0]:
             ok(f"Corregida: {resultado[1]}")
@@ -848,7 +984,7 @@ def cmd_fix(cfg: Config, fargs) -> None:
     for i, f in enumerate(candidatos, 1):
         print(f"\n{c(BOLD, f'[{i}/{len(candidatos)}]')} {f.relative_to(cfg.music_dir)}")
         try:
-            bien, msg = fix_auto_one(cfg, cache, f)
+            bien, msg = fix_auto_one(cfg, cache, f, yes=bool(fargs.yes))
             _write_json(CACHE_FILE, cache)
         except Exception as e:
             bien, msg = False, str(e)
@@ -860,7 +996,196 @@ def cmd_fix(cfg: Config, fargs) -> None:
     print(f"\n{c(GREEN, f'✔ {hechas}/{len(candidatos)} pistas corregidas')}")
 
 
-# ---------------------------------------------------------------- comandos --
+# ------------------------------------------------------------ verificación --
+def _md5(path: Path) -> str:
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+def cmd_verify(cfg: Config, fargs) -> None:
+    """Audita la biblioteca MP3: etiquetas, carátulas, nombres, librería y
+    (con --red) coherencia de nº de pista/título contra MusicBrainz."""
+    archivos = sorted(cfg.music_dir.rglob("*.mp3"))
+    if not archivos:
+        ok(f"No hay ningún MP3 en {cfg.music_dir}")
+        return
+    lib = load_library()
+    rutas_lib = {v.get("path") for v in lib.values() if isinstance(v, dict)}
+    problemas = []   # (fichero, [mensajes])
+    limpios = 0
+    print(f"Revisando {len(archivos)} ficheros en {cfg.music_dir}\n")
+    for f in archivos:
+        msgs = []
+        tags = _load_tags(f)
+        artista = _textframe(tags, "TPE1")
+        titulo = _textframe(tags, "TIT2")
+        album = _textframe(tags, "TALB")
+        pista_txt = _textframe(tags, "TRCK").split("/")[0]
+        if not tags:
+            msgs.append("sin etiquetas ID3")
+        else:
+            if not artista:
+                msgs.append("sin artista")
+            if not titulo:
+                msgs.append("sin título")
+            if not album:
+                msgs.append("sin álbum")
+            elif f.parent.parent == cfg.music_dir:
+                msgs.append("fuera de su carpeta de álbum")
+            if tags and not tags.getall("APIC"):
+                msgs.append("sin carátula")
+        # nombre del fichero ≠ etiquetas (tolerando sufijos «(2)» de repetidos)
+        if titulo:
+            pref = f"{int(pista_txt):02d} - " if pista_txt.isdigit() else ""
+            esperado = f"{pref}{sanitize(titulo)}.mp3"
+            if f.name != esperado:
+                hermano = f.parent / esperado
+                if hermano.exists():
+                    msgs.append("posible duplicado (ya existe el fichero canónico)")
+                else:
+                    msgs.append("nombre no corresponde con etiquetas")
+        if str(f) not in rutas_lib:
+            msgs.append("sin registro en library.json")
+        if msgs:
+            problemas.append((f, msgs))
+            print(c(YELLOW, "  ✖ ") + str(f.relative_to(cfg.music_dir))
+                  + c(DIM, f"  ({'; '.join(msgs)})"))
+        else:
+            limpios += 1
+    # entradas de la librería que apuntan a ficheros inexistentes
+    obsoletas = [
+        (vid, v["path"]) for vid, v in lib.items()
+        if isinstance(v, dict) and v.get("path") and not Path(v["path"]).exists()
+    ]
+    for vid, p in obsoletas:
+        print(c(YELLOW, "  ✖ ") + f"library.json apunta a {c(DIM, p)} (no existe)")
+
+    # --- con --red: contra MusicBrainz ---
+    if fargs.red and problemas:
+        grupos: dict[tuple, list] = {}
+        for f, msgs in problemas:
+            tags = _load_tags(f)
+            clave = (_textframe(tags, "TPE1"), _textframe(tags, "TALB"))
+            if clave[0] and clave[1]:
+                grupos.setdefault(clave, []).append(f)
+        info(f"Comprobando {len(grupos)} álbumes contra MusicBrainz (--red)...")
+        for (artista, album), fichs in grupos.items():
+            q = urllib.parse.quote(f'release:"{album}" AND artist:"{artista}"')
+            try:
+                hits = (_mb_get_retry(
+                    f"https://musicbrainz.org/ws/2/release/?query={q}&fmt=json&limit=5"
+                ) or {}).get("releases") or []
+            except Exception as e:
+                warn(f"No pude consultar MB para «{album}»: {e}")
+                continue
+            if not hits:
+                warn(f"«{album}» de {artista} no está en MusicBrainz")
+                continue
+            try:
+                rel = _mb_get_retry(
+                    f"https://musicbrainz.org/ws/2/release/{hits[0]['id']}"
+                    f"?fmt=json&inc=media+recordings"
+                ) or {}
+            except Exception as e:
+                warn(f"No pude consultar el release de «{album}»: {e}")
+                continue
+            tr_list = [(tr.get("position"), tr.get("title"))
+                       for med in rel.get("media", [])
+                       for tr in med.get("tracks", [])]
+            for f in fichs:
+                tags = _load_tags(f)
+                n = _textframe(tags, "TRCK").split("/")[0]
+                titulo = _textframe(tags, "TIT2")
+                nuevo = next((t for pos, t in tr_list if str(pos) == n), None)
+                if nuevo is None:
+                    problema_red = f"pista {n} no existe en «{album}» (MB)"
+                elif _similarity(titulo, nuevo) < 0.5:
+                    problema_red = f"pista {n}: etiqueta «{titulo}» vs MB «{nuevo}»"
+                else:
+                    continue
+                rode = None
+                for idx, (fl, ms) in enumerate(problemas):
+                    if fl == f:
+                        rode = idx
+                        break
+                if rode is None:
+                    problemas.append((f, [problema_red]))
+                    print(c(YELLOW, "  ✖ ") + str(f.relative_to(cfg.music_dir))
+                          + c(DIM, f"  ({problema_red})"))
+                else:
+                    problemas[rode][1].append(problema_red)
+                    print(c(YELLOW, "  ✖ ") + str(f.relative_to(cfg.music_dir))
+                          + c(DIM, f"  ({problema_red})"))
+
+    # --- resumen ---
+    if not problemas:
+        ok(f"Verificación: {limpios}/{len(archivos)} ficheros impecables")
+        if obsoletas:
+            subt = f"\n{c(YELLOW, str(len(obsoletas)))} entradas de library.json sin fichero"
+            print(subt)
+            if fargs.fix:
+                for vid, p in obsoletas:
+                    lib.pop(vid, None)
+                _write_json(LIBRARY_FILE, lib)
+                ok("Entradas obsoletas de library.json eliminadas")
+            else:
+                info("Corrección rápida:  ytd verify --fix")
+        return
+    print(f"\n{c(YELLOW, str(len(problemas)))} ficheros con incidencias, "
+          f"{c(GREEN, str(limpios))} limpios")
+    if fargs.fix:
+        # 1) duplicados: borrar los idénticos (MD5), actualizar library.json
+        quedan = []
+        eliminados = 0
+        for f, msgs in problemas:
+            sindup = [m for m in msgs if not m.startswith("posible duplicado")]
+            if len(sindup) != len(msgs):  # había un mensaje de duplicado
+                tags = _load_tags(f)
+                pista_txt = _textframe(tags, "TRCK").split("/")[0]
+                pref = f"{int(pista_txt):02d} - " if pista_txt.isdigit() else ""
+                canon = f.parent / f"{pref}{sanitize(_textframe(tags, 'TIT2'))}.mp3"
+                try:
+                    iguales = canon.exists() and _md5(f) == _md5(canon)
+                except Exception:
+                    iguales = False
+                if iguales:
+                    f.unlink()
+                    for vid, v in lib.items():
+                        if isinstance(v, dict) and v.get("path") == str(f):
+                            lib[vid] = {"path": str(canon),
+                                        "title": v.get("title", canon.stem)}
+                    _write_json(LIBRARY_FILE, lib)
+                    eliminados += 1
+                    print(c(GREEN, f"  ✔ borrado duplicado idéntico: {f.name}"))
+                else:
+                    sindup.append("duplicado con audio distinto (revisa a mano)")
+            if sindup:
+                quedan.append((f, sindup))
+        problemas = quedan
+        if eliminados:
+            print(f"{c(GREEN, f'  {eliminados} duplicados idénticos eliminados')}\n")
+        # 2) re-identificación del resto
+        if problemas:
+            info("Aplicando corrección automática sobre los ficheros con incidencias...")
+        cache = _read_json(CACHE_FILE, {})
+        corregidos = 0
+        for i, (f, _) in enumerate(problemas, 1):
+            print(f"\n{c(BOLD, f'[{i}/{len(problemas)}]')} {f.relative_to(cfg.music_dir)}")
+            try:
+                bien, msg = fix_auto_one(cfg, cache, f, yes=bool(fargs.yes))
+                _write_json(CACHE_FILE, cache)
+            except Exception as e:
+                bien, msg = False, str(e)
+            if bien:
+                corregidos += 1
+                ok(f"  {msg}")
+            else:
+                print(c(RED, "  ✖ ") + msg)
+        print(f"\n{c(GREEN, f'✔ {corregidos + eliminados}/{corregidos + eliminados + len(problemas)} incidencias resueltas')}")
+    else:
+        info("Corrección rápida sugerida:  ytd verify --fix  "
+             "(o ytd fix archivo.mp3 para corregir a mano)")
 def cmd_urls(cfg: Config, urls: list[str]) -> None:
     which_or_fail("yt-dlp", "sudo dnf install yt-dlp")
     q = load_queue()
@@ -1001,7 +1326,7 @@ def cmd_config() -> None:
 
 
 # -------------------------------------------------------------------- CLI --
-_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "clean", "config", "doctor", "help"}
+_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "verify", "clean", "config", "doctor", "help"}
 
 
 def main() -> None:
@@ -1016,13 +1341,16 @@ def main() -> None:
             "  ytd add <URL> | ytd dl | ytd queue | ytd retry failed | ytd doctor\n"
             "  ytd fix                       # re-identifica pistas sin álbum (sin re-descargar)\n"
             "  ytd fix file.mp3 --album 'Álbum' --pista 3 --artista 'Grupo'  # a mano\n"
+            "  ytd verify --red              # audita la biblioteca contra MusicBrainz\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("args", nargs="*",
-                    help="enlaces de YouTube o un subcomando (add/dl/queue/retry/search/clean/config/doctor)")
+                    help="enlaces de YouTube o un subcomando (add/dl/queue/retry/search/fix/verify/clean/config/doctor)")
     ap.add_argument("--dl", action="store_true", help="solo procesar la cola pendiente")
+    ap.add_argument("--yes", "-y", action="store_true",
+                    help="aceptar sin preguntas (dl / fix / verify --fix)")
     ns, extra = ap.parse_known_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1040,11 +1368,20 @@ def main() -> None:
         elif sub == "config":
             cmd_config()
         elif sub == "dl":
-            process_queue(cfg)
+            process_queue(cfg, yes=bool(ns.yes))
         elif sub == "add":
             if not rest:
                 fail("Uso: ytd add <URL> [URL...]")
             cmd_urls(cfg, rest)
+        elif sub == "verify":
+            vap = argparse.ArgumentParser(prog="ytd verify")
+            vap.add_argument("--red", action="store_true",
+                             help="compara nº de pista/título contra MusicBrainz")
+            vap.add_argument("--fix", action="store_true",
+                             help="re-identifica los ficheros con incidencias")
+            vap.add_argument("--yes", "-y", action="store_true",
+                             help="aceptar la huella sin pedir confirmación")
+            cmd_verify(cfg, vap.parse_args(rest))
         elif sub == "retry":
             if not rest:
                 fail('Uso: ytd retry <n> | ytd retry failed')
@@ -1063,6 +1400,8 @@ def main() -> None:
             fap.add_argument("--pista", "--track", dest="pista", type=int)
             fap.add_argument("--anio", "--año", "--year", dest="anio")
             fap.add_argument("--cover", help="imagen de la carátula (jpg/png)")
+            fap.add_argument("--yes", "-y", action="store_true",
+                             help="aceptar la huella sin pedir confirmación")
             cmd_fix(cfg, fap.parse_args(rest))
         elif sub == "help":
             ap.print_help()

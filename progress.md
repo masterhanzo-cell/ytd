@@ -4,6 +4,68 @@ Registro de desarrollo del CLI `/home/antonio/Nextcloud/YTD/ytd.py`.
 
 ---
 
+## 2026-11-04 — Sesión 2: publicación en GitHub + hito «confianza» y «verify»
+
+### Publicado en GitHub
+- ✅ Repo público: https://github.com/masterhanzo-cell/ytd (rama `main`,
+  gh CLI autenticado en el equipo del usuario).
+- ✅ `.gitignore` (excluye estado local, cache, y notas antiguas solo locales).
+- ✅ Commits iniciales: código, README revisado y progress.md.
+
+### v1.4 — Puerta de confianza (identificaciones dudosas) [hito 1]
+- ✅ `evalua_confianza()`: marca como dudosa cuando el score de AcoustID
+  < 0.5 o el título de la huella diverge del de YouTube (Jaccard sobre
+  tokens normalizados < 35%).
+- ✅ `decide_meta()` con prompt interactivo: `[s]aceptar huella`
+  `[y]usar título de YouTube` `[m]editar a mano` (artista/título/álbum/nº
+  con valores por defecto) `[n]omitir` (≈ dejan la pista pendiente).
+- ✅ Respeta `confirm_low_confidence` del config y flujos no interactivos:
+  en `ytd dl --yes` / `ytd fix --yes` / `ytd verify --fix --yes` se auto-acepta.
+- ✅ El flujo `fix` mapea `[y]` → «dejar las etiquetas actuales» (sin movimiento).
+- ⚠️ Pendiente de ejercicio real con prompts (por ahora se ha usado --yes;
+  el camino interactivo está compilado y probado estructuralmente).
+
+### v1.4 — `ytd verify` (auditoría de biblioteca) [hito 2]
+- ✅ Sin red: comprueba etiquetas ID3 faltantes (artista/título/álbum),
+  carátulas, nombre ⇒ etiquetas (con tolerancia de sufijos «(2)» al detectar
+  duplicado vs renombrado), ficheros fuera de su carpeta de álbum (álbumes
+  autotitulados incluidos), ficheiros sin registro en `library.json` y entradas
+  huérfanas de `library.json`.
+- ✅ `--red`: agrupa por artista+álbum, consulta el release en MusicBrainz y
+  confronta nº de pista vs título (matches por similitud). Con reintentos
+  503/429 generales (`_mb_get_retry`).
+- ✅ `--fix`: dos fases —
+  1. deduplicación: borra los duplicados **idénticos** (comparación MD5) y
+     reasigna las rutas de `library.json` a la copia canónica;
+  2. loop `fix_auto_one` (huella + MusicBrainz + retag + move) sobre el resto,
+     incluyendo las incidencias encontradas por `--red`.
+- ✅ Cambio en el flujo fix que da un resultado visible importantes:
+  `fix_auto_one` usa la miniatura de YouTube como respaldo de carátula
+  buscando la URL desde `library.json`/`queue.json` (antes el fix dejaba sin
+  carátula los match sin cover art en CAA).
+
+### Auditoría real resultante (muestra del resultado en mi biblioteca — 394 ficheros)
+- ✅ Casos «(2)» de Dream Theater resultaron ser **tomás distintas de live**
+  (fingerprints diferentes): verify los dej función «para revisión» por diseño
+  (correcto: MD5 divergía; solo eran duplicados a niveles «byte»).
+- ✅ Las carátulas faltantes (Symbolic, bonus de SBG…) quedaron pendientes y
+  se resolvieron con que ai hija. Tras el `--fix`: 31 → 11 incidencias.
+- ℹ️ Restante (decisiones del usuario): 3 pistas DT sin match acústico,
+  «posible duplicado» de tomas live distintas (sale bien conservar), y el caso
+  Clearlight/Spiritual Healing (dos listings de YouTube cuyos AUDIO real no
+  corresponde al título — el fingerprint responde honesto a lo que suena).
+
+### Ideas para siguientes versiones
+- [ ] Confirmación interactiva cuando el score de AcoustID sea bajo ✓ (hecho v1.4)
+- [ ] `ytd repair-only-tags` (retag sin re-consulta API).
+- [ ] Modo `--dry-run`.
+- [ ] Fallback a servidores Invidious/Piped si YouTube bloquea.
+- [ ] Respaldos del título de YouTube → búsqueda MusicBrainz cuando AcoustID no
+       vuelve con match (los «Artista desconocido»).
+- [ ] `ytd dedupe` interactiva por huella (candidato: los «(2)» DT).
+
+---
+
 ## 2026-11-03 — Sesión 1: versión base + puesta a punto identificación
 
 ### Construcción inicial (v1.0 → v1.1)
