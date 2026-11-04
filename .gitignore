@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editores/OS
+*.swp
+*~
+.DS_Store
+.idea/
+
+# Estado y configuración locales del usuario (viven fuera del repo):
+#   ~/.local/state/ytd/{queue,library,cache}.json
+#   ~/.config/ytd/config.toml
