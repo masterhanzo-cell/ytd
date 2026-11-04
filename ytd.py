@@ -1374,6 +1374,164 @@ def cmd_verify(cfg: Config, fargs) -> None:
     else:
         info("Corrección rápida sugerida:  ytd verify --fix  "
              "(o ytd fix archivo.mp3 para corregir a mano)")
+
+
+# ------------------------------------------------------------------- stats --
+def _bytes_h(n: float) -> str:
+    n = float(n)
+    for unidad in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unidad == "TiB":
+            return f"{int(n)} {unidad}" if unidad == "B" else f"{n:.1f} {unidad}"
+        n /= 1024
+
+
+def _duracion_h(seg: float) -> str:
+    seg = int(seg)
+    h, m = seg // 3600, (seg % 3600) // 60
+    return f"{h} h {m} min" if h else f"{m} min"
+
+
+def _duracion_mp3(path: Path) -> float:
+    try:
+        from mutagen.mp3 import MP3
+        return float(MP3(str(path)).info.length)
+    except Exception:
+        return 0.0
+
+
+def cmd_stats(cfg: Config) -> None:
+    """Salud de la biblioteca de un vistazo (rápido, sin red)."""
+    BAR = "═" * 78
+    print(c(BOLD, BAR))
+    print(c(BOLD, f"  Estadísticas — {cfg.music_dir}"))
+    print(c(BOLD, BAR))
+
+    # --- recolección sobre los ficheros ---
+    fichs = sorted(cfg.music_dir.rglob("*.mp3")) \
+        if cfg.music_dir.exists() else []
+    bytes_tot, seg_tot = 0, 0.0
+    artistas: dict[str, int] = {}
+    discos: dict[str, set[int]] = {}
+    num_pistas: dict[str, int] = {}
+    sin_carat, sin_album, desconocido = [], [], []
+    misma_c: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for f in fichs:
+        bytes_tot += f.stat().st_size
+        seg_tot += _duracion_mp3(f)
+        tags = _load_tags(f)
+        artista = _textframe(tags, "TPE1")
+        titulo = _textframe(tags, "TIT2")
+        album = _textframe(tags, "TALB")
+        n = _textframe(tags, "TRCK").split("/")[0]
+        artistas[artista or "(sin etiqueta)"] = \
+            artistas.get(artista or "(sin etiqueta)", 0) + 1
+        rel = str(f.relative_to(cfg.music_dir))
+        if album:
+            clave_d = f"{artista} / {album}"
+            discos.setdefault(clave_d, set())
+            num_pistas[clave_d] = num_pistas.get(clave_d, 0) + 1
+            if n.isdigit():
+                discos[clave_d].add(int(n))
+        else:
+            sin_album.append(rel)
+        if artista in ("", "Artista desconocido"):
+            desconocido.append(rel)
+        if not (tags and tags.getall("APIC")):
+            sin_carat.append(rel)
+        if titulo:
+            misma_c.setdefault((artista.lower(), titulo.lower()), {}) \
+                .setdefault(album or "(sencillos)", []).append(rel)
+
+    fila = "─" * 78
+    if fichs:
+        print(f"\n  {c(BOLD, 'Tamaño')}: {len(fichs)} MP3 · "
+              f"{_bytes_h(bytes_tot)} · {_duracion_h(seg_tot)}")
+        print(f"  {c(BOLD, 'Catálogo')}: {len(artistas)} artistas · "
+              f"{len(discos)} álbumes")
+        print(f"  {c(BOLD, 'Por artista')} (top {min(8, len(artistas))}):")
+        for art, num in sorted(artistas.items(), key=lambda kv: -kv[1])[:8]:
+            print(f"    {art:<38.38} {c(DIM, str(num))}")
+
+    # --- salud ---
+    print(f"\n  {c(BOLD, 'Salud de las etiquetas')}:")
+    con_carat = len(fichs) - len(sin_carat)
+    if sin_carat:
+        print(c(YELLOW, f"  ! Carátulas: faltan {len(sin_carat)} de {len(fichs)}"
+                        f"  (p. ej. {sin_carat[0]})"))
+    else:
+        print(c(GREEN, f"  ✔ Carátulas: {con_carat}/{len(fichs)}"))
+    if sin_album:
+        print(c(YELLOW, f"  ! Sin álbum: {len(sin_album)} ficheros sueltos"
+                        f"  (p. ej. {sin_album[0]})"))
+    else:
+        print(c(GREEN, f"  ✔ Álbum: todos los ficheros tienen disco asignado"))
+    if desconocido:
+        print(c(YELLOW, f"  ! Artista desconocido: {len(desconocido)}"
+                        f"  (p. ej. {desconocido[0]})"))
+    else:
+        print(c(GREEN, "  ✔ Artistas: ninguno quedó «desconocido»"))
+
+    dup_disco, dup_otro = [], []
+    for (art, tit), albums in misma_c.items():
+        por_disco = {d: rs for d, rs in albums.items() if len(rs) > 1}
+        for disco, rutas in por_disco.items():
+            dup_disco.append((f"{art or '?'} — {tit}", disco, rutas))
+        if not por_disco and len(albums) > 1:
+            dup_otro.append((art, tit))
+    if dup_disco:
+        total_dup = sum(len(rs) for _, _, rs in dup_disco)
+        print(c(YELLOW, f"  ! Duplicados en un mismo álbum: {total_dup} ficheros "
+                        f"en {len(dup_disco)} grupos"))
+        for tit, disco, rutas in sorted(dup_disco)[:3]:
+            print(f"    {c(DIM, '·')} {_truncar(f'{disco}: {tit}', 74)}")
+        if len(dup_disco) > 3:
+            print(c(DIM, f"    … y {len(dup_disco) - 3} grupos más"))
+    else:
+        print(c(GREEN, "  ✔ Sin duplicados en un mismo álbum"))
+    if dup_otro:
+        print(f"  {c(DIM, f'· mismo tema en varios discos (live/compilaciones): '
+                    f'{len(dup_otro)}')}" )
+
+    huecos = []
+    for clave_d, nums in discos.items():
+        esperados = set(range(1, num_pistas[clave_d] + 1))
+        if nums and nums != esperados and max(nums) > len(esperados):
+            huecos.append((clave_d, sorted(nums)))
+    if huecos:
+        print(c(YELLOW, f"  ! Álbumes incompletos (numeración con huecos): "
+                        f"{len(huecos)}"))
+        for clave_d, nums in huecos[:3]:
+            print(f"    {c(DIM, '·')} {clave_d}: pistas "
+                  f"{', '.join(str(i) for i in nums)}")
+        if len(huecos) > 3:
+            print(c(DIM, f"    … y {len(huecos) - 3} álbumes más"))
+    else:
+        print(c(GREEN, "  ✔ Numeración: sin huecos"))
+
+    # --- cola y registro ---
+    q = load_queue()
+    items = q["items"]
+    pend = sum(1 for i in items if i["status"] == "pending")
+    hechas = sum(1 for i in items if i["status"] == "done")
+    fall = sum(1 for i in items if i["status"] == "failed")
+    lib = load_library()
+    regs = len(lib)
+    obsoletas = sum(
+        1 for v in lib.values()
+        if isinstance(v, dict) and not Path(v.get("path", "")).exists())
+    print(f"\n  {c(BOLD, 'Cola y registro')}:")
+    print(f"    cola: {pend} pendientes · {hechas} hechas · {fall} fallidas  "
+          f"{c(DIM, '(ytd dl · ytd retry failed)')}")
+    print(f"    registro: {regs} vídeos · {obsoletas} entradas obsoletas  "
+          f"{c(DIM, '(ytd verify --fix)')}")
+
+    print(f"  {c(DIM, fila)}")
+    if not fichs and not items:
+        info("Añade música:  ytd <URL>  ·  ytd search \"artista - tema\"")
+    elif sin_carat or sin_album or desconocido or dup_disco or huecos:
+        info("Detalle completo:  ytd verify   ·   corregir a mano:  ytd edit archivo.mp3")
+
+
 def cmd_urls(cfg: Config, urls: list[str]) -> None:
     which_or_fail("yt-dlp", "sudo dnf install yt-dlp")
     q = load_queue()
@@ -1514,7 +1672,7 @@ def cmd_config() -> None:
 
 
 # -------------------------------------------------------------------- CLI --
-_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "edit", "verify", "clean", "config", "doctor", "help"}
+_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "config", "doctor", "help"}
 
 
 def main() -> None:
@@ -1530,6 +1688,7 @@ def main() -> None:
             "  ytd fix                       # re-identifica pistas sin álbum (sin re-descargar)\n"
             "  ytd fix file.mp3 --album 'Álbum' --pista 3 --artista 'Grupo'  # a mano\n"
             "  ytd verify --red              # audita la biblioteca contra MusicBrainz\n"
+            "  ytd stats                     # salud de la biblioteca de un vistazo\n"
             "  ytd edit archivo.mp3          # editor interactivo con sugerencias\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
@@ -1562,6 +1721,8 @@ def main() -> None:
             if not rest:
                 fail("Uso: ytd add <URL> [URL...]")
             cmd_urls(cfg, rest)
+        elif sub == "stats":
+            cmd_stats(cfg)
         elif sub == "edit":
             eap = argparse.ArgumentParser(prog="ytd edit")
             eap.add_argument("archivo", help="MP3 a editar")

@@ -161,6 +161,7 @@ distinto al de YouTube, el programa te pregunta:
 
 ```bash
 ytd config        # muestra los valores actuales y la ruta del config
+ytd stats         # salud de la biblioteca de un vistazo (rápido, sin red)
 ytd doctor        # comprueba dependencias (yt-dlp, ffmpeg, fpcalc, mutagen), API key
 ytd help
 ```
@@ -274,6 +275,9 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 
 ## Registro de versión rápida
 
+- **v1.6** — `ytd stats`: salud de la biblioteca de un vistazo — ficheros,
+  tamaño, duración, catálogo, carátulas/álbum/artistas pendientes, duplicados
+  en un mismo álbum, álbumes incompletos, estado de cola y registro.
 - **v1.5** — `ytd edit`: editor visual interactivo de metadatos con
   sugerencias (huella AcoustID + búsqueda MusicBrainz), preview antes de
   aplicar, conservación de carátula y campo año en la edición manual.

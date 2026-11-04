@@ -190,3 +190,28 @@ Clearlight/…                    1 (audio subido mal por el autor de la playlis
   destino final siempre se calcula dentro de `music_dir`.
 - La sección nueva del README es la 8b (entre «Cómo funciona» y
   «Solución de problemas»).
+
+## v1.6 — `ytd stats` (salud de la biblioteca de un vistazo)
+
+### Qué se añadió
+- Subcomando `ytd stats`: escaneo local rápido (sin red) de `music_dir` y
+  muestra: nº de MP3, tamaño total, duración total (mutagen MP3), nº de
+  artistas/álbumes y per-artistas top.
+- Salud de etiquetas: carátulas faltantes, ficheros sin álbum, «Artista
+  desconocido», duplicados y numeración con huecos.
+- Duplicados en DOS niveles para evitar ruido:
+  * **en un mismo álbum** (artista+título repetidos en la misma carpeta) →
+    alerta real (casi siempre sufijos «(2)»);
+  * «mismo tema en varios discos» → línea informativa (live/compilaciones,
+    es normal).
+- Álbumes incompletos: nº máximo de pista > nº de ficheros con esa pista
+  → lista los números presentes (p. ej. Death/Spiritual Healing 1,2,3,4,6,7,8).
+- Cola y registro: pendientes/hechas/fallidas de la cola y entradas
+  obsoletas de library.json, con los comandos de corrección sugeridos.
+- Helpers: `_bytes_h`, `_duracion_h`, `_duracion_mp3`.
+
+### Prueba real (biblioteca del usuario)
+- 538 MP3 · 7.9 GiB · 58 h 18 min · 5 artistas · 60 álbumes.
+- Detecta: 2 «Artista desconocido», 43 ficheros duplicados en 21 grupos,
+  4 entradas obsoletas, 2 fallidas en cola — coincide con lo conocido.
+
