@@ -215,3 +215,38 @@ Clearlight/…                    1 (audio subido mal por el autor de la playlis
 - Detecta: 2 «Artista desconocido», 43 ficheros duplicados en 21 grupos,
   4 entradas obsoletas, 2 fallidas en cola — coincide con lo conocido.
 
+
+## v1.7 — Fallback inteligente (título de YouTube → MusicBrainz)
+
+### Qué se añadió
+- `_mb_fallback_meta(yt_title)`: cuando AcoustID no da match, busca el tema
+  en MusicBrainz (WS2 search `recording`) usando el título de YouTube
+  limpio («Sepultura - Territory (Live) (2022 Remaster)» → art «Sepultura»,
+  tema «Territory»). Añadido helper `_para_busqueda()`: quita paréntesis
+  clasificadores ((Live), (2022 Remaster), [HQ]…) y palabras live/remaster.
+- Validación estricta del candidato: título con similitud ≥ 50 % Y artista
+  coherente (si había artista en el título). Si no hay artista adivinado y
+  varios artistas reclaman el mismo título → ambigüedad → None (seguro).
+- Enchufado en DOS flujos:
+  * `process_one` (descargas nuevas): antes de caer a «título de YouTube»,
+    prueba el fallback; el resultado pasa por `decide_meta` (con --yes /
+    config se auto-acepta tras las advertencias).
+  * `fix_auto_one` (reparación sin re-descargar): si no hay match de
+    huella, recupera el título original de YouTube desde library.json
+    (`_yn_titulo_origen`) porque suele incluir el artista, y luego fallback.
+- `cmd_edit`: cuando no hay ninguna sugerencia por etiquetas, también
+  consulta con el título original de YouTube («búsqueda YT».
+- **Bug corregido**: `cleanup_title` borraba «Artista - Título» entero
+  (patrón `[-|]` interpretaba el separador como ruido de canal) → la
+  similitud del control de confianza quedaba viciada y el fallback no
+  conseguía artista/título. Ahora solo limpia «| Canal» y similares.
+
+### Pruebas (caso real: «Artista desconocido/Territory (Live)»)
+- Con artista en el título → Sepultura/Territory + álbum + pista + carátula ✔
+- Sin artista en el título y 4-6 artistas con «Territory» → None seguro ✔
+  (correcto: es un tema repetido en Chaos A.D./Under a Pale Grey Sky/Metal
+  Veins; es decisión humana con `ytd edit`)
+- Sandbox de fix_auto_one descarta el movimiento si el fallback no cuadra ✔
+
+### Notas
+- El prompt de confianza ahora dice «huella:» o «sugerencia:» según origen.

@@ -332,8 +332,8 @@ def cleanup_title(t: str) -> str:
     patrones = [
         r"\s*[(\[]\s*(?:official\s+)?(?:music\s+)?(?:video|audio|lyric[s]?"
         r"|lyrical|visualizer|mv|hd|hq|4k)[^)\]]*[)\]]\s*",
-        r"\s*【[^】]*】\s*",
-        r"\s+[-|]\s+.*$",
+        r"\s+【[^】]*】\s*",
+        r"\s+\|\s+.*$",
     ]
     for pat in patrones:
         t = re.sub(pat, " ", t, flags=re.IGNORECASE)
@@ -617,6 +617,78 @@ def yt_meta_fallback(yt_title: str) -> dict:
     }
 
 
+def _para_busqueda(t: str) -> str:
+    """Limpia clasificadores de título de YouTube para consultas de búsqueda.
+
+    Quita grupos entre paréntesis/corchetes ((Live), (2022 Remaster), [HQ]…)
+    y palabras comodín tipo live/remaster/official."""
+    t = re.sub(r"\s*[(\[][^\)\]]*[)\]]\s*", " ", t or "")
+    t = re.sub(r"\b(live|remaster(ed)?(\s+\d{4})?|mono|stereo|"
+               r"single\s+version|album\s+version|bonus\s+track|"
+               r"official|video|audio|hd|hq|4k)\b", " ", t,
+               flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _yn_titulo_origen(path: Path) -> str | None:
+    """Recupera el título original de YouTube de un fichero desde library.json."""
+    for entrada in load_library().values():
+        if isinstance(entrada, dict) and entrada.get("path") == str(path):
+            return entrada.get("title")
+    return None
+
+
+def _mb_fallback_meta(yt_title: str) -> dict | None:
+    """Cuando AcoustID no da match: busca el título de YouTube en MusicBrainz.
+
+    Consulta recordings con artista+título adivinados del título de YouTube
+    (o solo título) y devuelve los metadatos completos del mejor candidato
+    (los metadatos ya incluyen álbum/pista/año/carátula). None si nada cuadra."""
+    title = cleanup_title(yt_title or "")
+    if not title:
+        return None
+    guessed, name = split_artist_title(title)
+    busca_tit = _para_busqueda(name)
+    busca_art = _para_busqueda(guessed or "")
+    if not busca_tit:
+        return None
+    candidatos: list[dict] = []
+    if busca_art:
+        candidatos = _mb_search_recordings(busca_art, busca_tit, limit=6)
+    if not candidatos:
+        candidatos = _mb_search_recordings("", busca_tit, limit=6)
+    if not candidatos:
+        return None
+
+    def s_titulo(cand: dict) -> float:
+        return _similarity(busca_tit, cand.get("title", ""))
+
+    def s_artista(cand: dict) -> float:
+        if not busca_art:
+            return 1.0
+        return _similarity(busca_art, cand.get("artist", ""))
+
+    # aptos: deben compartir tema (y artista, si lo adivinamos)
+    aptos = [cc for cc in candidatos
+             if s_titulo(cc) >= 0.5 and s_artista(cc) >= 0.5]
+    if not aptos:
+        return None
+    if not busca_art:
+        # sin artista del que partir, exigir que todos los aptos sean del
+        # mismo artista (si varios lo reclaman, es una propiedad ambigua)
+        artistas_aptos = {a.get("artist", "") for a in aptos}
+        if len(artistas_aptos) > 1:
+            info(f"«{busca_tit}» lo tienen {len(artistas_aptos)} artistas "
+                 f"(sin artista en el título no puedo elegir)")
+            return None
+    aptos.sort(key=lambda cc: 0.6 * s_titulo(cc) + 0.4 * s_artista(cc),
+               reverse=True)
+    mejor = aptos[0]
+    info(f"Búsqueda MusicBrainz: «{mejor.get('title')}» — "
+         f"{mejor.get('artist')} (título {s_titulo(mejor):.0%})")
+    return _meta_desde_recording(mejor["rid"])
+
+
 def _pedir_edicion_manual(meta: dict) -> dict:
     print(f"  Edita los campos (Enter = mantener el valor actual):")
     meta = dict(meta)
@@ -646,9 +718,10 @@ def decide_meta(cfg: Config, yt_title: str, meta: dict, fpmeta: dict | None,
     dudosa, motivos = evalua_confianza(yt_title, meta, fpmeta)
     if not dudosa:
         return meta
+    origen = "huella" if fpmeta else "sugerencia"
     for m in motivos:
         warn(f"Identificación dudosa: {m}")
-    print(f"    huella:  «{meta.get('title')}» — {meta.get('artist')}"
+    print(f"    {origen}:  «{meta.get('title')}» — {meta.get('artist')}"
           f"{(' [' + meta['album'] + ']') if meta.get('album') else ''}")
     print(f"    youtube: «{cleanup_title(yt_title or '')}»")
     if yes or not cfg.confirm or not sys.stdin.isatty():
@@ -759,13 +832,28 @@ def process_one(cfg: Config, cache: dict, item: dict,
                 return None, None
             meta = meta2
         else:
-            info("Uso el título de YouTube (sin huella acústica)")
-            meta = yt_meta_fallback(yt_title)
-            if thumb:
-                try:
-                    meta["cover"] = _http_get(thumb, ua="ytd/1.0", timeout=20)
-                except Exception:
-                    pass
+            # Sin huella acústica: intentamos localizar el tema en MusicBrainz
+            # con el título de YouTube antes de rendirnos a las etiquetas YT.
+            meta = None
+            try:
+                meta = _mb_fallback_meta(yt_title)
+            except Exception as e:
+                warn(f"Búsqueda MusicBrainz falló: {e}")
+            if meta and meta.get("album"):
+                info("Sin huella acústica, pero MusicBrainz encontró el tema")
+                meta2 = decide_meta(cfg, yt_title, meta, None, yes)
+                if meta2 is None:
+                    info("Pista omitida; queda pendiente para revisarla a mano")
+                    return None, None
+                meta = meta2
+            else:
+                info("Uso el título de YouTube (sin huella acústica)")
+                meta = yt_meta_fallback(yt_title)
+                if thumb:
+                    try:
+                        meta["cover"] = _http_get(thumb, ua="ytd/1.0", timeout=20)
+                    except Exception:
+                        pass
         dest = final_path(cfg, meta)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(mp3), str(dest))
@@ -889,14 +977,27 @@ def fix_auto_one(cfg: Config, cache: dict, path: Path, yes: bool = False) -> tup
         fpmeta = None
         warn(f"Huella no disponible: {e}")
     if not (fpmeta and fpmeta.get("rid")):
-        return False, "sin coincidencias acústicas"
-    thumb = thumb_for_file(path, cfg)
-    meta = enrich(fpmeta, thumb)
-    if not meta["title"]:
-        meta["title"] = titulo
-    if not meta["artist"]:
-        meta["artist"] = artista_old
-    if not (meta["artist"] and meta["album"]):
+        # Fallback: localiza el tema en MusicBrainz. Si conocemos el título
+        # original de YouTube (library.json) es mucho más seguro: incluye artista.
+        yt_orig = _yn_titulo_origen(path) or titulo
+        try:
+            meta_alt = _mb_fallback_meta(yt_orig)
+        except Exception as e:
+            meta_alt = None
+            warn(f"Búsqueda MusicBrainz falló: {e}")
+        if not (meta_alt and meta_alt.get("album")):
+            return False, "sin coincidencias acústicas (ni por título en MusicBrainz)"
+        fpmeta = None          # sin score: solo la divergencia de título cuestiona
+        thumb = thumb_for_file(path, cfg)
+        meta = meta_alt
+    else:
+        thumb = thumb_for_file(path, cfg)
+        meta = enrich(fpmeta, thumb)
+        if not meta["title"]:
+            meta["title"] = titulo
+        if not meta["artist"]:
+            meta["artist"] = artista_old
+    if not meta["album"]:
         return False, "MusicBrainz no aportó álbum"
     decision = decide_meta(cfg, titulo, meta, fpmeta, yes)
     if decision is None:
@@ -1125,6 +1226,17 @@ def cmd_edit(cfg: Config, pathstr: str, yes: bool = False) -> None:
                                  f"{_truncar(cand.get('title'), 28)} — {_truncar(cand.get('artist'), 25)}"))
         if not estampas:
             print("  (sin sugerencias para estos datos)")
+    # ¿el fichero proviene de una descarga con título de YouTube más completo?
+    if not estampas:
+        yt_orig = _yn_titulo_origen(path)
+        if yt_orig and yt_orig != meta_actual["title"]:
+            g, nn = split_artist_title(cleanup_title(yt_orig))
+            qa, qt = _para_busqueda(g or ""), _para_busqueda(nn or "")
+            if qa and qt:
+                for cand in _mb_search_recordings(qa, qt, limit=5):
+                    if cand.get("rid") and not any(rid == cand["rid"] for _, rid, _ in estampas):
+                        estampas.append(("búsqueda YT", cand["rid"],
+                                         f"{_truncar(cand.get('title'), 28)} — {_truncar(cand.get('artist'), 25)}"))
 
     # con --yes, aplica directamente la mejor sugerencia disponible
     if yes and estampas:

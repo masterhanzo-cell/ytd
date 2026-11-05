@@ -189,15 +189,21 @@ ytdlp_extra = ["--cookies-from-browser", "firefox"]
    (es independiente del bitrate/nombre: identifica por «ADN» acústica).
 3. **AcoustID**: la huella se consulta en AcoustID → devuelve una lista de
    grabaciones MusicBrainz candidatas con scores.
-4. **MusicBrainz**: se pregunta por álbum, año, nº de pista. El selector
+4. **Fallback por título**: si AcoustID no encuentra nada, se busca el
+   título de YouTube (limpio de «(Live)», «(2022 Remaster)»…) en la base
+   de MusicBrainz. Solo se acepta si similitud de título ≥ 50 % y el
+   artista cuadra; si el título es ambiguo (varios artistas lo reclaman
+   y no conocemos el artista), se pide decisión humana (`ytd edit`) en
+   lugar de arriesgar un fichero mal clasificado.
+5. **MusicBrainz**: se pregunta por álbum, año, nº de pista. El selector
    aplica reglas de calidad: prefiere la grabación de estudio (no «live»/
    demo), la posición de pista coherente con el tamaño del disco y la
    edición original sobre reediciones/remasterizaciones.
-5. **Carátula**: se baja de Cover Art Archive; si no hay, se recurre a la
+6. **Carátula**: se baja de Cover Art Archive; si no hay, se recurre a la
    miniatura del vídeo original.
-6. **Re-etiquetado**: mutagen escribe ID3 (título, artista, álbum, año,
+7. **Re-etiquetado**: mutagen escribe ID3 (título, artista, álbum, año,
    nº pista, carátula) — el resto del audio se deja intacto.
-7. **Biblioteca**: el fichero se mueve a `Artista/Álbum/NN - Título.mp3`
+8. **Biblioteca**: el fichero se mueve a `Artista/Álbum/NN - Título.mp3`
    o `Artista/Título.mp3` si no se identificó el álbum.
 
 Falsos positivos: AcoustID es muy fiable, pero una playlist puede contener
@@ -252,8 +258,10 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 - **«AcoustID no respondió 400»**:
   - clave inválida/errónea → revisala con `ytd doctor`; usa la clave de
     la APLICACIÓN, no tu clave personal.
-  - «Sin coincidencias acústicas»: ese upload no tiene match en la base;
-    usa `ytd fix archivo.mp3 --artista ... --album ...` para fijarlo manual.
+  - «Sin coincidencias acústicas»: este upload no tiene match en la base;
+    entonces se busca el título de YouTube en MusicBrainz (fallback por
+    título, v1.7). Si aún así no se puede (título ambiguo o sin match),
+    usa `ytd edit archivo.mp3` y elige la sugerencia correcta del panel.
 - **«yt-dlp terminó con código X»**: suelen ser bloqueos de YouTube.
   Usa cookies en el config (`ytdlp_extra = ["--cookies-from-browser", "firefox"]`)
   o actualiza yt-dlp.
@@ -275,6 +283,10 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 
 ## Registro de versión rápida
 
+- **v1.7** — Fallback inteligente: cuando AcoustID no da match, se busca el
+  título de YouTube en MusicBrainz (con limpieza de «(Live)»/«Remaster» y
+  validación de título+artista); ambigüedades se dejan para decisión humana.
+  Bug corregido: `cleanup_title` mataba «Artista - Título».
 - **v1.6** — `ytd stats`: salud de la biblioteca de un vistazo — ficheros,
   tamaño, duración, catálogo, carátulas/álbum/artistas pendientes, duplicados
   en un mismo álbum, álbumes incompletos, estado de cola y registro.
