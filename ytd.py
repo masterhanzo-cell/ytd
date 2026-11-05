@@ -2193,6 +2193,7 @@ def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
     # 3) datos del grupo y confirmación
     total_borrados = mb_liberados = 0
     lib = load_library()
+    q = load_queue()
     for g, grupo in enumerate(grupos, 1):
         canon = _canonico(grupo)
         resto = [f for f in grupo if f != canon]
@@ -2229,6 +2230,9 @@ def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
             for vid, v in list(lib.items()):
                 if isinstance(v, dict) and v.get("path") == str(f):
                     lib.pop(vid, None)
+                    # y su ítem de cola (done sin fichero → dl lo re-encolaría)
+                    q["items"] = [it for it in q["items"]
+                                  if it.get("vid") != vid]
             for clave in (str(f.resolve()), str(f)):
                 fps.pop(clave, None)
                 cache.get("vol", {}).pop(clave, None)
@@ -2236,8 +2240,8 @@ def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
             print(c(GREEN, f"    borrado: {f.name}"))
     _write_json(LIBRARY_FILE, lib)
     _write_json(CACHE_FILE, cache)
-
     if borrar and total_borrados:
+        save_queue(q)
         ok(f"{total_borrados} duplicados borrados · "
            f"{mb_liberados:.1f} MiB liberados")
     elif not borrar:
