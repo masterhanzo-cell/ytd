@@ -355,3 +355,24 @@ bajando, y al final pase fix con atención humana».
   30.2 MiB liberados, vidB/vidC fuera de lib, caché purgada.
 - Copia idéntica → sim 1.0; canción distinta → 0.52 (excluida por duración).
 - Sin --borrar: solo reporte, sin prompt.
+
+## v2.0.1 — fix crítico de `dedupe` + incidente documentado
+
+### Bug
+- Tras el pulido de etiquetas, la rama de borrado quedó INcondicional:
+  el modo solo-reporte borraba los no-canónicos sin confirmación.
+- Regresión añadida: en sandbox, modo reporte con grupo real → ningún
+  fichero borrado (assert); `--borrar --si` → borra solo el resto.
+- Etiquetas honestas por modo: «★ canónico / ≈ copia» en reporte,
+  «✔ conserva / ✖ borra» al aplicar.
+
+### Incidente (transparencia)
+- La pasada real de Dream Theater (reporte) con el bug borró
+  ATTACK…/01 - Perfect Strangers.mp3 (o0KD3jaBxAM) sin confirmar.
+- Recuperado al 100%: re-descarga del mismo vídeo (la huella dio
+  Perfect Strangers — Dream Theater [ATTACK of the 50ft EAR INFECTION],
+  ReplayGain -8.72 dB), fix_manual a la ruta original y registro
+  restaurado en library.json. revision.json limpio.
+- Aprendizaje: las pasadas de destrucción SIEMPRE deben estar puertas
+  por (borrar and (si or confirmed)); la prueba de regresión queda.
+
