@@ -376,3 +376,11 @@ bajando, y al final pase fix con atención humana».
 - Aprendizaje: las pasadas de destrucción SIEMPRE deben estar puertas
   por (borrar and (si or confirmed)); la prueba de regresión queda.
 
+
+### Limpieza real con v2.0.1
+- Pasada real DT (--borrar --si): grupo «Perfect Strangers» resuelto según
+  decisión del usuario → conserva A Change of Seasons/03, borra ATTACK…/01;
+  12.8 MiB liberados, carpeta ATTACK vacía eliminada, entrada lib e ítem
+  de cola (o0KD3jaBxAM) depurados.
+- Mejora durante la limpieza: cmd_dedupe ahora también remove el ítem
+  done de queue.json del fichero borrado (si no, dl lo re-encolaría).
