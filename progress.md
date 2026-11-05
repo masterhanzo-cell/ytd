@@ -284,3 +284,43 @@ bajando, y al final pase fix con atención humana».
   {vidmock1 → motivo completo}; `_revision_quitar` lo limpia; comandos
   `ytd revision` y `ytd help` operativos.
 
+
+## v1.9 — Normalización de volumen (`ytd normalizar`)
+
+### Decisiones (elegidas por el usuario)
+- Ambos modos: etiquetas ReplayGain por defecto + re-codificación con
+  `--rehacer` para uniformidad en cualquier dispositivo.
+- Descargas nuevas: etiqueta ReplayGain automática (config
+  `normalizar = true`, objetivo `normalizar_target = -18` LUFS).
+
+### Qué se añadió
+- `_medir_lufs(path)` → ffmpeg `loudnorm` pass-1 (decodifica y mide
+  LUFS integrado + pico dB; ~2-4 s por MP3).
+- `_ganancia_para(i, tp, target)`: ganancia lineal al objetivo, limitada
+  por pico (no clipea: gain ≤ -1.0 dB - peak). None si |Δ| < 0.2 dB.
+- `_escribir_rgain`: RVA2 (canal 1, desc «track») + TXXX
+  REPLAYGAIN_{REFERENCE_LOUDNESS,TRACK_GAIN,TRACK_PEAK} estándar, id3v2.3.
+- `_quitar_rgain`, `_tiene_rgain`, `normalizar_etiquetas` (mide+escribe),
+  `normalizar_rehacer` (re-encode libmp3lame 320k con `volume=XdB` y
+  re-escribe etiquetas existentes vía tag_mp3; NO guarda ReplayGain para
+  no aplicar la normalización dos veces).
+- `cmd_normalizar`: sobre un archivo o toda la biblioteca; cachea la
+  medición en cache.json bajo clave «vol» por ruta (?), respeta ya
+  etiquetados (o `--fuerza`), pide confirmación si >5 ficheros (o `--si`),
+  reporta por pista «LUFS → +X dB», resumen final con consejo.
+- `process_one`: tras tag_mp3, si cfg.normalizar → normalizar_etiquetas
+  con aviso de la ganancia aplicada.
+- Config: nuevas claves `normalizar`, `normalizar_target` (+DEFAULT_CONFIG,
+  cmd_config muestra el estado).
+
+### Bug encontrado por la prueba
+- RVA2 de mutagen NO acepta listas en gain/peak (pese a su declaración de
+  tipo): pasar floats (`gain=gain_db, peak=10**(tp/20)`).
+
+### Pruebas reales (sandbox con ficheros de la biblioteca)
+- Etiquetado: 01 - Symbolic → -9.0 LUFS → -8.96 dB; RVA2 leído
+  (-8.9609, peak 1.1844), TXXX coherente.
+- Idempotente: 2ª pasada sin --fuerza → «ya tiene ReplayGain».
+- --rehacer: re-codifica, RVA2 ausente (correcto, lagulapa se cocinó).
+- --quitar limpia todo.
+

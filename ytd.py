@@ -87,6 +87,11 @@ ytdlp_extra = []
 # (score de huella bajo o título muy divergente del de YouTube).
 # Con false se auto-acepta siempre; con true pregunta (o usa ytd dl --yes).
 confirm_low_confidence = true
+
+# Normalización de volumen de descargas nuevas con etiquetas ReplayGain
+# (sin pérdida de calidad; el reproductor aplica la ganancia).
+# normalizar_target = -18   # LUFS objetivo (estándar ReplayGain)
+normalizar = true
 """
 
 
@@ -98,6 +103,9 @@ class Config:
         ).expanduser()
         self.ytdlp_extra: list[str] = list(data.get("ytdlp_extra") or [])
         self.confirm: bool = bool(data.get("confirm_low_confidence", True))
+        self.normalizar: bool = bool(data.get("normalizar", True))
+        self.normalizar_target: int = int(
+            data.get("normalizar_target", -18) or -18)
 
 
 def load_config() -> Config:
@@ -708,6 +716,114 @@ def _mb_fallback_meta(yt_title: str) -> dict | None:
     return _meta_desde_recording(mejor["rid"])
 
 
+# --------------------------------------------------- volumen / loudness -----
+def _medir_lufs(path: Path) -> tuple[float, float]:
+    """Mide (LUFS integrado, pico dB) de un fichero con ffmpeg loudnorm.
+
+    Es un full-scan (decodifica la pista entera): ~2-4 s para un MP3."""
+    proc = subprocess.run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-i", str(path),
+         "-map", "0:a:0", "-vn",
+         "-af", "loudnorm=I=-18:LRA=11:TP=-1.0:print_format=json",
+         "-f", "null", "-"],
+        capture_output=True, text=True, timeout=600,
+    )
+    m = re.search(r"\{[\s\S]*?\}", proc.stderr)
+    if not m:
+        raise RuntimeError("ffmpeg no devolvió medición loudnorm")
+    data = json.loads(m.group(0))
+    input_i, input_tp = float(data["input_i"]), float(data["input_tp"])
+    if input_i <= -99 or input_tp <= -99:
+        raise RuntimeError("pista mudas/silencio: medición inválida")
+    return input_i, input_tp
+
+
+def _ganancia_para(input_i: float, input_tp: float, target: int) -> float | None:
+    """Ganancia lineal (dB) para llevar la pista al objetivo LUFS.
+
+    Limita por pico para no clipear. None si ya está a la altura."""
+    gan = target - input_i
+    margen = -1.0 - input_tp
+    if gan > margen:
+        gan = margen
+    gan = round(gan, 2)
+    return None if abs(gan) < 0.2 else gan
+
+
+def _escribir_rgain(path: Path, gain_db: float, peak_db: float) -> None:
+    """Escribe etiquetas ReplayGain 1.0 (RVA2 + TXXX estándar)."""
+    from mutagen.id3 import RVA2, TXXX, ID3
+    tags = ID3(str(path))
+    tags.setall("RVA2", [RVA2(desc="track", channel=1,
+                              gain=gain_db, peak=10 ** (peak_db / 20))])
+    tags.setall("TXXX:REPLAYGAIN_REFERENCE_LOUDNESS",
+                [TXXX(encoding=3, desc="REPLAYGAIN_REFERENCE_LOUDNESS",
+                      text=["-18 dB"])])
+    tags.setall("TXXX:REPLAYGAIN_TRACK_GAIN",
+                [TXXX(encoding=3, desc="REPLAYGAIN_TRACK_GAIN",
+                      text=[f"{gain_db:+.2f} dB"])])
+    tags.setall("TXXX:REPLAYGAIN_TRACK_PEAK",
+                [TXXX(encoding=3, desc="REPLAYGAIN_TRACK_PEAK",
+                      text=[f"{10 ** (peak_db / 20):.6f}"])])
+    tags.save(str(path), v2_version=3)
+
+
+def _quitar_rgain(path: Path) -> None:
+    from mutagen.id3 import ID3
+    tags = ID3(str(path))
+    borrado = False
+    for k in [k for k in tags.keys()
+              if k.startswith("RVA2") or k.startswith("TXXX:REPLAYGAIN")]:
+        del tags[k]
+        borrado = True
+    if borrado:
+        tags.save(str(path), v2_version=3)
+
+
+def _tiene_rgain(path: Path) -> bool:
+    tags = _load_tags(path)
+    return bool(tags and tags.getall("RVA2"))
+
+
+def normalizar_etiquetas(path: Path, target: int = -18) -> float | None:
+    """Mide y escribe ReplayGain. Devuelve la ganancia aplicada (dB) o None."""
+    i, tp = _medir_lufs(path)
+    gan = _ganancia_para(i, tp, target)
+    if gan is None:
+        return None
+    _escribir_rgain(path, gan, tp)
+    return gan
+
+
+def normalizar_rehacer(path: Path, gain_db: float) -> None:
+    """Re-codifica la pista con la ganancia fijada (modo --rehacer).
+
+    Conserva todas las etiquetas (incluida carátula) vía tag_mp3; NO escribe
+    ReplayGain para no duplicar la normalización al reproducir."""
+    tags_before = _load_tags(path)
+    meta = {
+        "artist": _textframe(tags_before, "TPE1"),
+        "title": _textframe(tags_before, "TIT2"),
+        "album": _textframe(tags_before, "TALB"),
+        "year": _textframe(tags_before, "TDRC").split("-")[0],
+        "track": int(_textframe(tags_before, "TRCK").split("/")[0] or 0) or None,
+        "cover": (tags_before.getall("APIC")[0].data
+                  if tags_before.getall("APIC") else None),
+    }
+    tmp = path.with_suffix(".norm.mp3")
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-y", "-i", str(path),
+         "-map", "0:a:0", "-vn",
+         "-af", f"volume={gain_db}dB",
+         "-c:a", "libmp3lame", "-b:a", "320k",
+         str(tmp)],
+        check=True, capture_output=True, timeout=600,
+    )
+    shutil.move(str(tmp), str(path))
+    tag_mp3(path, meta)   # reescritura completa de etiquetas originales
+
+
+# ------------------------------------------------------------ edición manual
 def _pedir_edicion_manual(meta: dict) -> dict:
     print(f"  Edita los campos (Enter = mantener el valor actual):")
     meta = dict(meta)
@@ -882,6 +998,15 @@ def process_one(cfg: Config, cache: dict, item: dict,
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(mp3), str(dest))
         tag_mp3(dest, meta)
+        if cfg.normalizar:
+            try:
+                gan = normalizar_etiquetas(dest, target=cfg.normalizar_target)
+                if gan is not None:
+                    info(f"ReplayGain {gan:+.2f} dB")
+                else:
+                    info("Volumen ya en el objetivo (ReplayGain no necesario)")
+            except Exception as e:
+                warn(f"Normalización omitida: {e}")
         if auto:
             _revision_marca(item.get("vid"), yt_title,
                             "resuelta automática: " + "; ".join(auto))
@@ -1855,12 +1980,111 @@ def cmd_config() -> None:
     print(f"Archivo de configuración: {c(BOLD, str(CONFIG_FILE))}")
     print(f"  music_dir = {cfg.music_dir}")
     print(f"  acoustid_api_key = {'•••' + cfg.api_key[-4:] if cfg.api_key else c(RED, '(vacía)')}")
+    print(f"  normalizar = {cfg.normalizar}  "
+          f"(objetivo {cfg.normalizar_target} LUFS en descargas nuevas)")
     if not cfg.api_key:
         print("\n  Registra tu clave gratis en: https://acoustid.org/new-application")
 
 
+# ------------------------------------------------------------ normalización -
+def cmd_normalizar(cfg: Config, archivo: str | None, rehacer: bool = False,
+                   quitar: bool = False, si: bool = False,
+                   fuerza: bool = False) -> None:
+    """Homogeneiza el volumen de la biblioteca (ReplayGain o re-codificación)."""
+    if archivo:
+        fichs = [Path(archivo).expanduser().resolve()]
+        if not fichs[0].exists():
+            fail(f"No existe {fichs[0]}")
+    else:
+        fichs = sorted(cfg.music_dir.rglob("*.mp3")) \
+            if cfg.music_dir.exists() else []
+    if not fichs:
+        warn("No hay MP3 que normalizar")
+        return
+
+    if quitar:
+        hechas = 0
+        for f in fichs:
+            try:
+                _quitar_rgain(f)
+                hechas += 1
+            except Exception:
+                pass
+        ok(f"Etiquetas ReplayGain borradas de {hechas} ficheros")
+        return
+
+    target = cfg.normalizar_target
+    cache = _read_json(CACHE_FILE, {})
+    vol = cache.setdefault("vol", {})
+
+    if not rehacer:
+        fichs = [f for f in fichs if fuerza or not _tiene_rgain(f)]
+        if not fichs:
+            ok(f"Toda la biblioteca ya tiene ReplayGain "
+               f"(objetivo {target} LUFS)")
+            return
+    if len(fichs) > 5 and not si:
+        modo = "RE-CODIFICAR" if rehacer else "etiquetar ReplayGain de"
+        try:
+            rta = input(
+                f"  Se van a {modo} {len(fichs)} ficheros "
+                f"(tarda; ~2-4 s por pista). ¿Continuar? [s]/n: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if rta not in ("", "s", "y"):
+            info("Cancelado")
+            return
+
+    modo = "re-codificando" if rehacer else "etiquetando"
+    hechas = al_punto = fallos = 0
+    for i, f in enumerate(fichs, 1):
+        rel = str(f.relative_to(cfg.music_dir)) \
+            if f.is_relative_to(cfg.music_dir) else str(f)
+        clave = str(f.resolve())
+        try:
+            if not fuerza and clave in vol and all(
+                    k in vol[clave] for k in ("i", "tp")):
+                i_lufs, tp = vol[clave]["i"], vol[clave]["tp"]
+            else:
+                i_lufs, tp = _medir_lufs(f)
+                vol[clave] = {"i": i_lufs, "tp": tp}
+        except Exception as e:
+            print(c(RED, f"  [{i}/{len(fichs)}] ✖ {rel}  ({e})"))
+            fallos += 1
+            continue
+        gan = _ganancia_para(i_lufs, tp, target)
+        if gan is None:
+            print(f"  [{i}/{len(fichs)}] {c(DIM, rel)}  ya al punto "
+                  f"({i_lufs:.1f} LUFS)")
+            al_punto += 1
+            continue
+        try:
+            if rehacer:
+                normalizar_rehacer(f, gan)
+            else:
+                _escribir_rgain(f, gan, tp)
+        except Exception as e:
+            print(c(RED, f"  [{i}/{len(fichs)}] ✖ {rel}  ({e})"))
+            fallos += 1
+            continue
+        print(f"  [{i}/{len(fichs)}] {c(DIM, rel)}  "
+              f"{i_lufs:.1f} LUFS → {gan:+.2f} dB "
+              f"{c(GREEN, 're-codificado' if rehacer else 'ReplayGain')}")
+        hechas += 1
+    _write_json(CACHE_FILE, cache)
+    print(f"\n{c(GREEN, f'✔ {hechas} ficheros {modo}, {al_punto} ya al punto')}"
+          + (c(RED, f" · {fallos} fallidos") if fallos else ""))
+    if hechas and not rehacer:
+        info("La ganancia vive en las etiquetas: activa ReplayGain en tu "
+             "reproductor (VLC/foobar/Clementine…) para notarla")
+    if hechas and rehacer:
+        info("Volumen uniforme en cualquier dispositivo: no hace falta "
+             "soporte del reproductor")
+
+
 # -------------------------------------------------------------------- CLI --
-_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "revision", "config", "doctor", "help"}
+_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "revision", "normalizar", "config", "doctor", "help"}
 
 
 def main() -> None:
@@ -1880,6 +2104,7 @@ def main() -> None:
             "  ytd edit archivo.mp3          # editor interactivo con sugerencias\n"
             "  ytd dl --desatendido          # sin preguntas: elige lo más probable\n"
             "  ytd revision                  # repasa lo resuelto en desatendido\n"
+            "  ytd normalizar                # ReplayGain en toda la biblioteca\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1908,6 +2133,23 @@ def main() -> None:
             cmd_config()
         elif sub == "dl":
             process_queue(cfg, yes=bool(ns.yes))
+        elif sub == "normalizar":
+            apn = argparse.ArgumentParser(prog="ytd normalizar")
+            apn.add_argument("archivo", nargs="?", default=None,
+                             help="MP3 concreto (vacío: toda la biblioteca)")
+            apn.add_argument("--rehacer", action="store_true",
+                             help="re-codifica aplicando la ganancia "
+                                  "(uniforme en cualquier reproductor)")
+            apn.add_argument("--quitar", action="store_true",
+                             help="borra las etiquetas ReplayGain")
+            apn.add_argument("--fuerza", action="store_true",
+                             help="vuelve a medir aunque esté etiquetado/en caché")
+            apn.add_argument("--si", "-y", action="store_true",
+                             help="sin pregunta de confirmación")
+            a = apn.parse_args(rest)
+            cmd_normalizar(cfg, a.archivo, rehacer=a.rehacer,
+                           quitar=a.quitar, si=bool(a.si or ns.yes),
+                           fuerza=a.fuerza)
         elif sub == "revision":
             rap = argparse.ArgumentParser(prog="ytd revision")
             rap.add_argument("--yes", "-y", action="store_true",

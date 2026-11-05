@@ -192,6 +192,35 @@ ytd doctor        # comprueba dependencias (yt-dlp, ffmpeg, fpcalc, mutagen), AP
 ytd help
 ```
 
+## 6b. Normalización de volumen (`ytd normalizar`)
+
+Las descargas de YouTube llegan con niveles distintos (masters modernos muy
+fuertes, vídeos viejos flojos…). `ytd normalizar` hace la biblioteca sonar
+homogénea:
+
+```bash
+ytd normalizar                # etiqueta ReplayGain en TODA la biblioteca
+ytd normalizar archivo.mp3    # solo un fichero
+ytd normalizar --rehacer      # re-codifica aplicando la ganancia (ver abajo)
+ytd normalizar --quitar       # borra las etiquetas ReplayGain
+ytd normalizar --fuerza       # re-mide aunque ya esté etiquetado
+```
+
+**Modo por defecto (etiquetas):** mide el LUFS real de cada pista con
+`ffmpeg loudnorm` (pass-1), calcula la ganancia lineal para llevarla a
+**-18 LUFS** (estándar ReplayGain, limitada por pico para no clipear) y la
+escribe en las etiquetas (RVA2 + TXXX). **Sin pérdida de calidad, reversible**;
+tu reproductor aplica el volumen (VLC, foobar2000, Clementine, música de
+Android… comprueba el ajuste «ReplayGain» de tu player).
+
+**`--rehacer`:** la ganancia queda fijada en el audio (re-codificación a
+320 kbps). Sonará igual en cualquier dispositivo sin soporte del
+reproductor — a coste de una segunda generación de compresión MP3.
+
+- Las **descargas nuevas** se etiquetan solas (config `normalizar = true`).
+- La medición se guarda en caché: re-ejecutar solo toca lo nuevo.
+- Pistas ya al objetivo (±0.2 dB) se omiten con su valor.
+
 ## 7. Configuración (`~/.config/ytd/config.toml`)
 
 | Clave              | Descripción                                              |
@@ -200,6 +229,8 @@ ytd help
 | `music_dir`        | Carpeta destino (por defecto `~/Música/YTD`)             |
 | `ytdlp_extra`      | Argumentos extra para yt-dlp, p. ej. cookies de navegador |
 | `confirm_low_confidence` | Pregunta cuando la identificación parece dudosa    |
+| `normalizar`       | ReplayGain automático en descargas nuevas (por defecto true) |
+| `normalizar_target`| LUFS objetivo (por defecto `-18`, estándar ReplayGain)   |
 
 Ejemplo con cookies (útil para vídeos con restricción de edad o 18+):
 
@@ -310,6 +341,11 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 
 ## Registro de versión rápida
 
+- **v1.9** — Normalización de volumen: `ytd normalizar` mide LUFS con
+  ffmpeg (loudnorm pass-1) y escribe ReplayGain (RVA2 + TXXX, reversible,
+  objetivo -18 LUFS limitado por pico); `--rehacer` re-codifica 320k con
+  ganancia fija; `--quitar`/`--fuerza`; descargas nuevas se etiquetan solas
+  (`normalizar = true`).
 - **v1.8** — Modo desatendido (`--desatendido/-y/--yes` global): resuelve
   dudas automáticamente sin atorarse y registra cada decisión automática
   en `revision.json`; `ytd revision` repasa esas pistas con atención
