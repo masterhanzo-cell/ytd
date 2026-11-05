@@ -12,6 +12,9 @@ __pycache__/
 # Nota de progreso antigua (superseded by progress.md), solo local
 progreso.md
 
+# Gustos personales (no subir al público)
+recomendaciones por genero.txt
+
 # Estado y configuración locales del usuario (viven fuera del repo):
 #   ~/.local/state/ytd/{queue,library,cache}.json
 #   ~/.config/ytd/config.toml
