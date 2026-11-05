@@ -321,6 +321,6 @@ bajando, y al final pase fix con atención humana».
 - Etiquetado: 01 - Symbolic → -9.0 LUFS → -8.96 dB; RVA2 leído
   (-8.9609, peak 1.1844), TXXX coherente.
 - Idempotente: 2ª pasada sin --fuerza → «ya tiene ReplayGain».
-- --rehacer: re-codifica, RVA2 ausente (correcto, lagulapa se cocinó).
+- --rehacer: re-codifica, RVA2 ausente (correcto: la ganancia se cocinó).
 - --quitar limpia todo.
 
