@@ -250,3 +250,37 @@ Clearlight/…                    1 (audio subido mal por el autor de la playlis
 
 ### Notas
 - El prompt de confianza ahora dice «huella:» o «sugerencia:» según origen.
+
+## v1.8 — Modo desatendido con revisión humana posterior
+
+### Motivación (petición del usuario)
+En playlist grandes, el prompt de confianza bloquea el proceso cuando no
+hay nadie que decida. La solución pide: por defecto interactivo; opción
+explícita para desatendido que «escoja la opción más probable, siga
+bajando, y al final pase fix con atención humana».
+
+### Qué se añadió
+- Flag global `--desatendido` (alias de `-y/--yes`) en `ytd dl`, `ytd <URL>`,
+  `ytd add` (y aplica igual a `fix`/`verify --fix`).
+- Registro de revisión `~/.local/state/ytd/revision.json`: cada resolución
+  automática (score bajo, título divergente, sin match con etiquetas YT)
+  Widritas {vid → {title, motivo}} para el pase humano. Helpers
+  `_revision_marca`, `_revision_quitar`.
+- `decide_meta` marca `meta["_auto"] = motivos` solo en la rama de
+  auto-aceptación (no cuando decide el humano).
+- `process_one`: quita la marca interna antes de etiquetar; si hubo
+  `_auto` llama `_revision_marca(vid, yt_title, …)`; si la identificación
+  fue limpia limpia cola cualquier revision previa del vid (re-descargas).
+- Subcomando `ytd revision [--yes]`: lista las pistas pendientes con su
+  motivo, localiza el fichero vía library.json y ejecuta `fix_auto_one`
+  (interactivo, o `--yes`); quita del registro lo resuelto/fichero
+  desaparecido. Resumen final con pendientes.
+- `process_queue` avisa al terminar: «N pistas quedaron resueltas
+  automáticamente → ytd revision».
+
+### Prueba (con mocks, sin red)
+- download/acoustid falsos: score 0.15 → auto-aceptación y marca con
+  motivos; fichero creado con etiquetas del match; revision.json registra
+  {vidmock1 → motivo completo}; `_revision_quitar` lo limpia; comandos
+  `ytd revision` y `ytd help` operativos.
+

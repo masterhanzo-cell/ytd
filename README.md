@@ -87,6 +87,7 @@ ytd retry 7       # reintentar el elemento 7
 ytd retry failed  # reintentar todas las fallidas
 ytd clean         # limpiar de la cola las ya hechas
 ytd dl            # procesar la cola pendiente
+ytd revision      # repasar los ficheros resueltos automáticamente (v. 3b)
 ```
 
 Reset completo (empieza de cero, borra todo el registro):
@@ -96,6 +97,31 @@ rm ~/.local/state/ytd/queue.json ~/.local/state/ytd/cache.json \
    ~/.local/state/ytd/library.json
 # y si también quieres olvidar la música: rm -rf ~/Música/YTD
 ```
+
+## 3b. Modo desatendido (`--desatendido`) y revisión humana (`ytd revision`)
+
+Por defecto, cuando la identificación parece dudosa el programa **te
+pregunta** — ideal para descargas pequeñas o con presencia. Para playlists
+grandes donde nadie va a decidir, el modo desatendido elige siempre la
+opción más probable y **no se para**:
+
+```bash
+ytd <URL de la playlist> --desatendido   # o  ytd dl --desatendido  (alias: -y / --yes)
+```
+
+Cada decisión automática (score de huella bajo, título divergente, sin
+match, etc.) queda registrada en `~/.local/state/ytd/revision.json`.
+Al terminar, `ytd dl` te avisa:
+
+```bash
+ytd revision          # repasa esas pistas una a una con atención humana
+ytd revision --yes    # o re-identificarlas todas sin preguntar
+```
+
+`ytd revision` usa el mismo motor de corrección que `ytd fix`: recalcula
+la huella, propone la mejor vía MusicBrainz (con el fallback por título)
+y pregunta antes de mover/retiquetar. Cada fichero corregido sale del
+registro automáticamente, así que el registro solo contiene lo que falta.
 
 ## 4. Corregir metadatos (`ytd fix`)
 
@@ -276,6 +302,7 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 ├── queue.json                   # cola persistente de descargas
 ├── library.json                 # id de vídeo → fichero MP3 (deduplicación)
 ├── cache.json                   # caché huella→metadatos (acelera re-fix)
+├── revision.json                # pistas resueltas en desatendido, por repasar
 └── tmp/                         # temporal de cada descarga
 ```
 
@@ -283,6 +310,10 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 
 ## Registro de versión rápida
 
+- **v1.8** — Modo desatendido (`--desatendido/-y/--yes` global): resuelve
+  dudas automáticamente sin atorarse y registra cada decisión automática
+  en `revision.json`; `ytd revision` repasa esas pistas con atención
+  humana (o `--yes`). Caché de carátulas inalterada.
 - **v1.7** — Fallback inteligente: cuando AcoustID no da match, se busca el
   título de YouTube en MusicBrainz (con limpieza de «(Live)»/«Remaster» y
   validación de título+artista); ambigüedades se dejan para decisión humana.

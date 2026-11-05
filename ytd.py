@@ -65,6 +65,7 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 QUEUE_FILE = STATE_DIR / "queue.json"
 LIBRARY_FILE = STATE_DIR / "library.json"
 CACHE_FILE = STATE_DIR / "cache.json"
+REVISION_FILE = STATE_DIR / "revision.json"
 TMP_DIR = STATE_DIR / "tmp"
 
 DEFAULT_CONFIG = """\
@@ -137,6 +138,24 @@ def save_queue(q: dict) -> None:
 
 def load_library() -> dict:
     return _read_json(LIBRARY_FILE, {})
+
+
+def _revision_marca(vid: str | None, titulo: str, motivo: str) -> None:
+    """Registra una pista resuelta automáticamente (para revisión humana)."""
+    if not vid:
+        return
+    rev = _read_json(REVISION_FILE, {})
+    rev[vid] = {"title": titulo, "motivo": motivo}
+    _write_json(REVISION_FILE, rev)
+
+
+def _revision_quitar(vid: str | None) -> None:
+    if not vid:
+        return
+    rev = _read_json(REVISION_FILE, {})
+    if vid in rev:
+        rev.pop(vid, None)
+        _write_json(REVISION_FILE, rev)
 
 
 # ---------------------------------------------------------------- externos --
@@ -726,6 +745,8 @@ def decide_meta(cfg: Config, yt_title: str, meta: dict, fpmeta: dict | None,
     print(f"    youtube: «{cleanup_title(yt_title or '')}»")
     if yes or not cfg.confirm or not sys.stdin.isatty():
         warn("Aceptando la huella automáticamente (--yes / config)")
+        meta = dict(meta)
+        meta["_auto"] = motivos      # rastro para el pase de revisión
         return meta
     while True:
         try:
@@ -849,15 +870,23 @@ def process_one(cfg: Config, cache: dict, item: dict,
             else:
                 info("Uso el título de YouTube (sin huella acústica)")
                 meta = yt_meta_fallback(yt_title)
+                meta["_auto"] = [
+                    "sin match en AcoustID y MusicBrainz: etiquetas de YouTube"]
                 if thumb:
                     try:
                         meta["cover"] = _http_get(thumb, ua="ytd/1.0", timeout=20)
                     except Exception:
                         pass
+        auto = meta.pop("_auto", None)   # las marcas internas no van al fichero
         dest = final_path(cfg, meta)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(mp3), str(dest))
         tag_mp3(dest, meta)
+        if auto:
+            _revision_marca(item.get("vid"), yt_title,
+                            "resuelta automática: " + "; ".join(auto))
+        else:
+            _revision_quitar(item.get("vid"))
         return dest, meta
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -921,6 +950,10 @@ def process_queue(cfg: Config, yes: bool = False) -> None:
         hechos += 1
     _write_json(CACHE_FILE, cache)
     print(f"\n{c(GREEN, BOLD)}✔ {hechos} nuevas canciones en {cfg.music_dir}{c(RESET, '')}")
+    revs = _read_json(REVISION_FILE, {})
+    if revs:
+        info(f"{len(revs)} pistas quedaron resueltas automáticamente:\n"
+             "  ytd revision        # repásalas una a una con atención humana")
 
 
 # ----------------------------------------------------------------- fix ------
@@ -1644,7 +1677,7 @@ def cmd_stats(cfg: Config) -> None:
         info("Detalle completo:  ytd verify   ·   corregir a mano:  ytd edit archivo.mp3")
 
 
-def cmd_urls(cfg: Config, urls: list[str]) -> None:
+def cmd_urls(cfg: Config, urls: list[str], yes: bool = False) -> None:
     which_or_fail("yt-dlp", "sudo dnf install yt-dlp")
     q = load_queue()
     lib = load_library()
@@ -1681,7 +1714,7 @@ def cmd_urls(cfg: Config, urls: list[str]) -> None:
         ok("Nada nuevo por descargar")
         return
     info(f"{nuevas} nuevas en la cola. Descargando...")
-    process_queue(cfg)
+    process_queue(cfg, yes=yes)
 
 
 def cmd_search(cfg: Config, query: str) -> None:
@@ -1774,6 +1807,49 @@ def cmd_clean() -> None:
     ok(f"Eliminadas {antes - len(q['items'])} entradas hechas de la cola")
 
 
+# -------------------------------------------------------------- revision ----
+def cmd_revision(cfg: Config, yes: bool = False) -> None:
+    """Repasa las pistas resueltas automáticamente en modo desatendido."""
+    rev = _read_json(REVISION_FILE, {})
+    if not rev:
+        ok("Nada pendiente de revisión (revision.json vacío)")
+        return
+    lib = load_library()
+    cache = _read_json(CACHE_FILE, {})
+    print(f"{c(BOLD, str(len(rev)))} pistas resueltas automáticamente\n")
+    hechas = 0
+    for i, (vid, e) in enumerate(list(rev.items()), 1):
+        ruta = ((lib.get(vid) or {}).get("path"))
+        f = Path(ruta) if ruta else None
+        if f and f.exists() and f.is_relative_to(cfg.music_dir):
+            nombre = str(f.relative_to(cfg.music_dir))
+        else:
+            nombre = str(f) if f else "(sin fichero en la biblioteca)"
+        print(f"\n{c(BOLD, f'[{i}/{len(rev)}]')} {nombre}")
+        print(c(DIM, f"  motivo: {e.get('motivo')}"))
+        if not (f and f.exists()):
+            warn("  el fichero ya no existe: lo quito del registro de revisión")
+            rev.pop(vid, None)
+            continue
+        try:
+            bien, msg = fix_auto_one(cfg, cache, f, yes=yes)
+        except Exception as ex:
+            bien, msg = False, str(ex)
+        if bien:
+            hechas += 1
+            ok(f"  {msg}")
+            rev.pop(vid, None)
+        else:
+            print(c(RED, "  ✖ ") + msg
+                  + c(DIM, "  (sigue pendiente de revisión)"))
+    _write_json(CACHE_FILE, cache)
+    _write_json(REVISION_FILE, rev)
+    print(f"\n{c(GREEN, f'✔ {hechas} revisadas')}"
+          + (c(DIM, f" · {len(rev)} siguen pendientes") if rev else ""))
+    if rev:
+        info("Alternativa manual:  ytd edit archivo.mp3")
+
+
 def cmd_config() -> None:
     cfg = load_config()
     print(f"Archivo de configuración: {c(BOLD, str(CONFIG_FILE))}")
@@ -1784,7 +1860,7 @@ def cmd_config() -> None:
 
 
 # -------------------------------------------------------------------- CLI --
-_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "config", "doctor", "help"}
+_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "revision", "config", "doctor", "help"}
 
 
 def main() -> None:
@@ -1802,6 +1878,8 @@ def main() -> None:
             "  ytd verify --red              # audita la biblioteca contra MusicBrainz\n"
             "  ytd stats                     # salud de la biblioteca de un vistazo\n"
             "  ytd edit archivo.mp3          # editor interactivo con sugerencias\n"
+            "  ytd dl --desatendido          # sin preguntas: elige lo más probable\n"
+            "  ytd revision                  # repasa lo resuelto en desatendido\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1809,8 +1887,9 @@ def main() -> None:
     ap.add_argument("args", nargs="*",
                     help="enlaces de YouTube o un subcomando (add/dl/queue/retry/search/fix/verify/clean/config/doctor)")
     ap.add_argument("--dl", action="store_true", help="solo procesar la cola pendiente")
-    ap.add_argument("--yes", "-y", action="store_true",
-                    help="aceptar sin preguntas (dl / fix / verify --fix)")
+    ap.add_argument("--yes", "-y", "--desatendido", dest="yes",
+                    action="store_true",
+                    help="modo desatendido: sin preguntas (elige lo más probable y deja el resto en 'ytd revision')")
     ns, extra = ap.parse_known_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1829,6 +1908,11 @@ def main() -> None:
             cmd_config()
         elif sub == "dl":
             process_queue(cfg, yes=bool(ns.yes))
+        elif sub == "revision":
+            rap = argparse.ArgumentParser(prog="ytd revision")
+            rap.add_argument("--yes", "-y", action="store_true",
+                             help="re-identificar sin preguntar (usa la huella)")
+            cmd_revision(cfg, yes=bool(rap.parse_args(rest).yes))
         elif sub == "add":
             if not rest:
                 fail("Uso: ytd add <URL> [URL...]")
@@ -1876,10 +1960,10 @@ def main() -> None:
             ap.print_help()
         return
     if ns.dl:
-        process_queue(cfg)
+        process_queue(cfg, yes=bool(ns.yes))
         return
     if words:
-        cmd_urls(cfg, list(words))
+        cmd_urls(cfg, list(words), yes=bool(ns.yes))
         return
     if any(it["status"] == "pending" for it in load_queue()["items"]):
         warn("Tienes la cola pendiente, procesándola...")
