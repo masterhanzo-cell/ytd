@@ -2198,20 +2198,31 @@ def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
         resto = [f for f in grupo if f != canon]
         print(f"{c(BOLD, f'[{g}/{len(grupos)}]')} duplicados:")
         for f in grupo:
-            marca = f"  {c(GREEN, '✔ conserva')} " if f == canon \
-                else f"  {c(RED, '✖ borra   ')} "
+            if f == canon:
+                marca = f"  {c(GREEN, '✔ conserva')} " if borrar \
+                    else f"  {c(GREEN, '★ canónico')} "
+            else:
+                marca = f"  {c(RED, '✖ borra   ')} " if borrar \
+                    else f"  {c(YELLOW, '≈ copia  ')} "
             tam = f.stat().st_size / (1 << 20)
             print(f"{marca}{_truncar(str(f), 90)}  "
                   f"{c(DIM, f'({tam:.1f} MiB · {duraciones[f]} s)')}")
-        if borrar and not si:
-            try:
-                rta = input("    ¿Son copias idénticas y borro el resto? "
-                            "[s]/n: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                rta = "n"
-            if rta not in ("", "s", "y"):
-                info("   grupo conservado sin cambios")
-                continue
+        borrar_grupo = False
+        if borrar:
+            if si:
+                borrar_grupo = True
+            else:
+                try:
+                    rta = input("    ¿Son copias idénticas y borro el resto? "
+                                "[s]/n: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    rta = "n"
+                borrar_grupo = rta in ("", "s", "y")
+        if not borrar:
+            continue          # solo-reporte: no se toca NINGÚN fichero
+        if not borrar_grupo:
+            info("   grupo conservado sin cambios")
+            continue
         for f in resto:
             mb_liberados += f.stat().st_size / (1 << 20)
             f.unlink()
