@@ -183,6 +183,26 @@ distinto al de YouTube, el programa te pregunta:
   preguntar (útil en descargas nocturnas grandes).
 - Configurable con `confirm_low_confidence = true/false` en el config.
 
+## 5b. Duplicados acústicos (`ytd dedupe`)
+
+`verify` detecta los duplicados por nombre; `dedupe` los detecta por
+**audio real** (huella acústica completa de cada fichero, comparada bit a
+bit con penalización de duración). Solo se comparan pistas con la misma
+duración (±2 s): dos tomas live u otras versiones nunca salen marcadas
+por error.?
+
+```bash
+ytd dedupe                    # busca y lista los grupos de copias (sin tocar nada)
+ytd dedupe --borrar           # borra los duplicados guardando el canónico
+ytd dedupe --borrar --si      # lo mismo sin preguntar grupo a grupo
+ytd dedupe Sepultura          # limita el análisis a un artista (subcarpeta)
+ytd dedupe --umbral 0.95      # similitud mínima (por defecto 0,98: copias exactas)
+```
+
+- El **canónico** de cada grupo es el fichero sin sufijo «(2)»/«(3)…» y de
+  menor ruta; los demás se borran junto con su registro en `library.json`.
+- Las huellas completas quedan cacheadas: la 2ª pasada es instantánea.
+
 ## 6. Otros comandos
 
 ```bash
@@ -341,6 +361,10 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 
 ## Registro de versión rápida
 
+- **v2.0** — `ytd dedupe`: duplicados por huella acústica completa
+  (fpcalc full + Hamming bit-a-bit, mismo umbral 0.98 por defecto y
+  poda por duración ±2 s); borrado con selección de canónico y limpieza
+  de library.json/caché; huellas cacheadas.
 - **v1.9** — Normalización de volumen: `ytd normalizar` mide LUFS con
   ffmpeg (loudnorm pass-1) y escribe ReplayGain (RVA2 + TXXX, reversible,
   objetivo -18 LUFS limitado por pico); `--rehacer` re-codifica 320k con

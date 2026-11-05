@@ -324,3 +324,34 @@ bajando, y al final pase fix con atención humana».
 - --rehacer: re-codifica, RVA2 ausente (correcto: la ganancia se cocinó).
 - --quitar limpia todo.
 
+
+## v2.0 — `ytd dedupe` (duplicados por huella acústica)
+
+### Diseño
+- Detección por AUDIO real, no por nombre: `fpcalc_full` huella completa
+  (sin -length) + comparación Hamming bit a bit entre enteros de 32 bits
+  (`_sim_fp`), con penalización de longitud distinta.
+- Poda por duración: solo se comparan pistas con duración ±2 s → las
+  tomas live u otras versiones nunca se marcan de error y el O(n²) se
+  reduce drásticamente.
+- Umbral por defecto 0.98 (copias del mismo master; otra canción da ~0.5).
+- Canónico por grupo: sin sufijo «(2)» y menor ruta; el resto se borra
+  (con confirmación por grupo salvo --si) junto con su entrada de
+  library.json (IMPORTANTÍSIMO: si no, dl re-encolaría el borrado) y se
+  purga de las cachés fp/vol.
+- Caché de huellas en cache.json clave «fp» {ruta: {fp, dur, size}} con
+  invalidación por tamaño; 2ª pasada instantánea.
+- Flags: ruta (o toda la biblioteca), --borrar, --si (o -y global),
+  --umbral.
+
+### Bugs del camino
+- base64 de chromaprint: alfabeto URL-safe SIN padding → urlsafe_b64decode
+  (+ relleno explícito). Con b64decode estándar los '-'/'_' se descartaban
+  y toda similitud daba 0.0.
+
+### Pruebas (sandbox)
+- 4 ficheros: Symbolic + Symbolic (2) + Symbolic (2) en Leprosy + Leprosy:
+  1 grupo detectado, canónico correcto «Symbolic.mp3», 2 borrados,
+  30.2 MiB liberados, vidB/vidC fuera de lib, caché purgada.
+- Copia idéntica → sim 1.0; canción distinta → 0.52 (excluida por duración).
+- Sin --borrar: solo reporte, sin prompt.

@@ -383,6 +383,39 @@ def fpcalc(path: Path) -> tuple[str, int]:
     return data["fingerprint"], int(data["duration"])
 
 
+def fpcalc_full(path: Path) -> tuple[str, int]:
+    """Huella de la pista completa (sin -length) + duración en segundos."""
+    out = subprocess.run(
+        ["fpcalc", "-json", str(path)],
+        capture_output=True, text=True, check=True, timeout=300,
+    )
+    data = json.loads(out.stdout)
+    return data["fingerprint"], int(data["duration"])
+
+
+def _sim_fp(a: str, b: str) -> float:
+    """Similitud entre dos fingerprints chromaprint (0..1).
+
+    Decodifica los enteros de 32 bits y compara bit a bit (Hamming);
+    la diferencia de longitud penaliza (corta vs larga)."""
+    import base64, struct
+    def decod(s: str):
+        raw = base64.urlsafe_b64decode(s + "=" * ((4 - len(s) % 4) % 4))
+        n = len(raw) // 4
+        return struct.unpack(f"<{n}I", raw[: n * 4])
+    try:
+        da, db = decod(a), decod(b)
+    except Exception:
+        return 0.0
+    n, m = len(da), len(db)
+    if n == 0 or m == 0:
+        return 0.0
+    diffs = sum((x ^ y).bit_count() for x, y in zip(da, db))
+    total = max(n, m) * 32
+    dif = diffs + (max(n, m) - min(n, m)) * 32
+    return max(0.0, 1.0 - dif / total)
+
+
 def acoustid_lookup(path: Path, cfg: Config, cache: dict) -> dict | None:
     """Huella acústica → AcoustID. Devuelve None si no hay match o falla."""
     if not shutil.which("fpcalc"):
@@ -2083,8 +2116,125 @@ def cmd_normalizar(cfg: Config, archivo: str | None, rehacer: bool = False,
              "soporte del reproductor")
 
 
+# ---------------------------------------------------------------- dedupe ----
+def _canonico(grupo: list[Path]) -> Path:
+    """El fichero canónico del grupo: sin «(2)», menor nº de pista, ordenado."""
+    return min(grupo, key=lambda p: (
+        "(" in p.name,      # los «(2)» no son canon
+        str(p).lower(),
+    ))
+
+
+def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
+               si: bool = False, umbral: float = 0.98) -> None:
+    """Encuentra audio duplicado comparando huellas acústicas completas.
+
+    Solo se comparan pistas con la misma duración (±2 s): las tomas live
+    u otras versiones duran distinto y quedan fuera de juego."""
+    raiz = Path(carpeta).expanduser().resolve() if carpeta else cfg.music_dir
+    if not raiz.exists():
+        fail(f"No existe {raiz}")
+    fichs = sorted(raiz.rglob("*.mp3"))
+    if len(fichs) < 2:
+        warn("Menos de 2 ficheros: nada que comparar")
+        return
+
+    cache = _read_json(CACHE_FILE, {})
+    fps = cache.setdefault("fp", {})
+    huellas: dict[Path, str] = {}
+    duraciones: dict[Path, int] = {}
+    nuevas = 0
+    for i, f in enumerate(fichs, 1):
+        clave = str(f.resolve())
+        tam = f.stat().st_size
+        hit = fps.get(clave)
+        if hit and hit.get("size") == tam and hit.get("fp"):
+            huellas[f], duraciones[f] = hit["fp"], hit["dur"]
+            continue
+        try:
+            fp, dur = fpcalc_full(f)
+        except Exception as e:
+            print(c(RED, f"  [huella {i}/{len(fichs)}] ✖ {f.name} ({e})"))
+            continue
+        fps[clave] = {"fp": fp, "dur": dur, "size": tam}
+        huellas[f], duraciones[f] = fp, dur
+        nuevas += 1
+        if len(fichs) <= 120:
+            rel = str(f.relative_to(raiz)) if f.is_relative_to(raiz) else str(f)
+            print(f"  [huella {i}/{len(fichs)}] {c(DIM, rel)}")
+    _write_json(CACHE_FILE, cache)
+    fichs = [f for f in fichs if f in huellas]
+
+    # 2) comparación por bits de huella, solo misma duración (±2 s)
+    fichs.sort(key=lambda f: duraciones[f])
+    grupos: list[list[Path]] = []
+    en_grupo: set[Path] = set()
+    for i, fa in enumerate(fichs[:-1]):
+        if fa in en_grupo:
+            continue
+        grupo = [fa]
+        for fb in fichs[i + 1:]:
+            if fb in en_grupo or abs(duraciones[fa] - duraciones[fb]) > 2:
+                continue
+            if _sim_fp(huellas[fa], huellas[fb]) >= umbral:
+                grupo.append(fb)
+                en_grupo.add(fb)
+        if len(grupo) > 1:
+            en_grupo.add(fa)
+            grupos.append(grupo)
+
+    msg = (f" ({nuevas} huellas nuevas calculadas)" if nuevas else "")
+    if not grupos:
+        ok(f"Sin duplicados acústicos (umbral {umbral:.2f}){msg}")
+        return
+
+    print(f"\n{c(YELLOW, str(len(grupos)))} grupos de audio duplicado "
+          f"(umbral {umbral:.2f}){msg}\n")
+    # 3) datos del grupo y confirmación
+    total_borrados = mb_liberados = 0
+    lib = load_library()
+    for g, grupo in enumerate(grupos, 1):
+        canon = _canonico(grupo)
+        resto = [f for f in grupo if f != canon]
+        print(f"{c(BOLD, f'[{g}/{len(grupos)}]')} duplicados:")
+        for f in grupo:
+            marca = f"  {c(GREEN, '✔ conserva')} " if f == canon \
+                else f"  {c(RED, '✖ borra   ')} "
+            tam = f.stat().st_size / (1 << 20)
+            print(f"{marca}{_truncar(str(f), 90)}  "
+                  f"{c(DIM, f'({tam:.1f} MiB · {duraciones[f]} s)')}")
+        if borrar and not si:
+            try:
+                rta = input("    ¿Son copias idénticas y borro el resto? "
+                            "[s]/n: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                rta = "n"
+            if rta not in ("", "s", "y"):
+                info("   grupo conservado sin cambios")
+                continue
+        for f in resto:
+            mb_liberados += f.stat().st_size / (1 << 20)
+            f.unlink()
+            for vid, v in list(lib.items()):
+                if isinstance(v, dict) and v.get("path") == str(f):
+                    lib.pop(vid, None)
+            for clave in (str(f.resolve()), str(f)):
+                fps.pop(clave, None)
+                cache.get("vol", {}).pop(clave, None)
+            total_borrados += 1
+            print(c(GREEN, f"    borrado: {f.name}"))
+    _write_json(LIBRARY_FILE, lib)
+    _write_json(CACHE_FILE, cache)
+
+    if borrar and total_borrados:
+        ok(f"{total_borrados} duplicados borrados · "
+           f"{mb_liberados:.1f} MiB liberados")
+    elif not borrar:
+        info("Ejecuta de nuevo con  ytd dedupe --borrar  para limpiar estos grupos")
+
+
 # -------------------------------------------------------------------- CLI --
-_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "revision", "normalizar", "config", "doctor", "help"}
+_SUBS = {"add", "dl", "queue", "retry", "search", "fix", "stats", "edit", "verify", "clean", "revision", "normalizar", "dedupe", "config", "doctor", "help"}
 
 
 def main() -> None:
@@ -2105,6 +2255,7 @@ def main() -> None:
             "  ytd dl --desatendido          # sin preguntas: elige lo más probable\n"
             "  ytd revision                  # repasa lo resuelto en desatendido\n"
             "  ytd normalizar                # ReplayGain en toda la biblioteca\n"
+            "  ytd dedupe --borrar           # borra duplicados por huella acústica\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2133,6 +2284,19 @@ def main() -> None:
             cmd_config()
         elif sub == "dl":
             process_queue(cfg, yes=bool(ns.yes))
+        elif sub == "dedupe":
+            dap = argparse.ArgumentParser(prog="ytd dedupe")
+            dap.add_argument("carpeta", nargs="?", default=None,
+                             help="área a comparar (vacío: toda la biblioteca)")
+            dap.add_argument("--borrar", action="store_true",
+                             help="borrar los ficheros duplicados (con confirmación)")
+            dap.add_argument("--si", "-y", action="store_true",
+                             help="sin preguntas (usa --borrar para aplicar)")
+            dap.add_argument("--umbral", type=float, default=0.98,
+                             help="similitud mínima de huella (0..1; por defecto 0.98)")
+            d = dap.parse_args(rest)
+            cmd_dedupe(cfg, d.carpeta, borrar=d.borrar, si=bool(d.si or ns.yes),
+                       umbral=d.umbral)
         elif sub == "normalizar":
             apn = argparse.ArgumentParser(prog="ytd normalizar")
             apn.add_argument("archivo", nargs="?", default=None,
