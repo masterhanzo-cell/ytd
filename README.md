@@ -361,6 +361,8 @@ ytd edit archivo.mp3 --yes  # aplica directamente la mejor sugerencia
 
 ## Registro de versión rápida
 
+- **v2.1** — `ytd clean --todo`: vacía la cola entera de una vez (hechas +
+  pendientes + fallidas) con confirmación o `--si`.
 - **v2.0** — `ytd dedupe`: duplicados por huella acústica completa
   (fpcalc full + Hamming bit-a-bit, mismo umbral 0.98 por defecto y
   poda por duración ±2 s); borrado con selección de canónico y limpieza

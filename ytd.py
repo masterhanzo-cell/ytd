@@ -1957,9 +1957,26 @@ def cmd_retry(arg: str) -> None:
     info("Ejecuta 'ytd dl' para procesar la cola")
 
 
-def cmd_clean() -> None:
+def cmd_clean(todo: bool = False, si: bool = False) -> None:
     q = load_queue()
     antes = len(q["items"])
+    if not antes:
+        ok("La cola ya está vacía")
+        return
+    if todo:
+        if not si:
+            try:
+                rta = input(f"  ¿Vaciar TODA la cola ({antes} entradas)? "
+                            "[s]/n: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                rta = "n"
+            if rta not in ("", "s", "y"):
+                info("Cancelado")
+                return
+        q["items"] = []
+        save_queue(q)
+        ok(f"Cola vaciada: {antes} entradas eliminadas (history y pendientes)")
+        return
     q["items"] = [it for it in q["items"] if it["status"] != "done"]
     save_queue(q)
     ok(f"Eliminadas {antes - len(q['items'])} entradas hechas de la cola")
@@ -2271,6 +2288,7 @@ def main() -> None:
             "  ytd revision                  # repasa lo resuelto en desatendido\n"
             "  ytd normalizar                # ReplayGain en toda la biblioteca\n"
             "  ytd dedupe --borrar           # borra duplicados por huella acústica\n"
+            "  ytd clean --todo              # vacía la cola entera de una vez\n"
             "Cualquier URL se encola y se descarga automáticamente.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2294,7 +2312,13 @@ def main() -> None:
         elif sub == "queue":
             cmd_queue()
         elif sub == "clean":
-            cmd_clean()
+            cap = argparse.ArgumentParser(prog="ytd clean")
+            cap.add_argument("--todo", action="store_true",
+                             help="vaciar la cola ENTERA (hechas + pendientes + fallidas)")
+            cap.add_argument("--si", "-y", action="store_true",
+                             help="sin pregunta de confirmación")
+            a = cap.parse_args(rest)
+            cmd_clean(todo=a.todo, si=bool(a.si or ns.yes))
         elif sub == "config":
             cmd_config()
         elif sub == "dl":

@@ -384,3 +384,10 @@ bajando, y al final pase fix con atención humana».
   de cola (o0KD3jaBxAM) depurados.
 - Mejora durante la limpieza: cmd_dedupe ahora también remove el ítem
   done de queue.json del fichero borrado (si no, dl lo re-encolaría).
+
+## v2.1 — `ytd clean --todo`
+- A petición del usuario (aunque después re-hizo nada): flag `--todo`
+  vacía la cola entera con confirmación (o `--si`); `clean` a secas
+  sigue quitando solo las «done».
+- Probado en sandbox (done+pending+failed → []) y usado en real:
+  cola de 1696 entradas → 0.
