@@ -2161,6 +2161,9 @@ def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
     huellas: dict[Path, str] = {}
     duraciones: dict[Path, int] = {}
     nuevas = 0
+    est = max(1, len(fichs) * 3 // 60)
+    print(f"  huellas de {len(fichs)} ficheros (~{est} min la primera vez)",
+          flush=True)
     for i, f in enumerate(fichs, 1):
         clave = str(f.resolve())
         tam = f.stat().st_size
@@ -2171,14 +2174,21 @@ def cmd_dedupe(cfg: Config, carpeta: str | None, borrar: bool = False,
         try:
             fp, dur = fpcalc_full(f)
         except Exception as e:
-            print(c(RED, f"  [huella {i}/{len(fichs)}] ✖ {f.name} ({e})"))
+            print(c(RED, f"  [huella {i}/{len(fichs)}] ✖ {f.name} ({e})"),
+                  flush=True)
             continue
         fps[clave] = {"fp": fp, "dur": dur, "size": tam}
         huellas[f], duraciones[f] = fp, dur
         nuevas += 1
+        # avance visible SIEMPRE + guardado incremental (Ctrl+C no pierde todo)
         if len(fichs) <= 120:
             rel = str(f.relative_to(raiz)) if f.is_relative_to(raiz) else str(f)
-            print(f"  [huella {i}/{len(fichs)}] {c(DIM, rel)}")
+            print(f"  [huella {i}/{len(fichs)}] {c(DIM, rel)}", flush=True)
+        elif i % 40 == 0 or i == len(fichs):
+            print(f"  [huella {i}/{len(fichs)}] …{c(DIM, f.name[-46:])}",
+                  flush=True)
+        if nuevas % 40 == 0:
+            _write_json(CACHE_FILE, cache)
     _write_json(CACHE_FILE, cache)
     fichs = [f for f in fichs if f in huellas]
 
